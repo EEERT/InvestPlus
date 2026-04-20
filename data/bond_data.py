@@ -21,23 +21,23 @@ def fetch_bond_spot() -> pd.DataFrame:
             return pd.DataFrame(columns=["代码", "名称", "现价", "涨跌幅"])
 
         col_map = {}
-        # Map code column
-        for c in ["代码", "bond_id", "code"]:
+        # Map code column – include Sina API field name "symbol"
+        for c in ["代码", "bond_id", "code", "symbol"]:
             if c in df.columns:
                 col_map[c] = "代码"
                 break
-        # Map name column
+        # Map name column – include Sina API field name "name"
         for c in ["名称", "bond_name", "name"]:
             if c in df.columns:
                 col_map[c] = "名称"
                 break
-        # Map current price column
-        for c in ["最新价", "现价", "close", "price"]:
+        # Map current price column – include Sina API field name "trade"
+        for c in ["最新价", "现价", "close", "price", "trade"]:
             if c in df.columns:
                 col_map[c] = "现价"
                 break
-        # Map change pct column
-        for c in ["涨跌幅", "change_pct", "pct_chg"]:
+        # Map change pct column – include Sina API field name "changepercent"
+        for c in ["涨跌幅", "change_pct", "pct_chg", "changepercent"]:
             if c in df.columns:
                 col_map[c] = "涨跌幅"
                 break
@@ -59,15 +59,26 @@ def fetch_bond_spot() -> pd.DataFrame:
 def fetch_bond_comparison() -> pd.DataFrame:
     """
     Fetch convertible bond comparison data including fundamental metrics.
+    Tries bond_cov_comparison() first; falls back to bond_zh_cov() if that fails.
     Returns DataFrame with standardised column names.
     """
+    # Primary source: Eastmoney comparison table
     try:
         df = ak.bond_cov_comparison()
-        if df is None or df.empty:
-            return pd.DataFrame()
-        return df.copy()
+        if df is not None and not df.empty:
+            return df.copy()
     except Exception:
-        return pd.DataFrame()
+        pass
+
+    # Fallback source: Eastmoney comprehensive bond list
+    try:
+        df = ak.bond_zh_cov()
+        if df is not None and not df.empty:
+            return df.copy()
+    except Exception:
+        pass
+
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=120)
