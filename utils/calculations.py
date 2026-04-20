@@ -357,8 +357,17 @@ def merge_bond_data(
     def _put_days(row: pd.Series) -> int:
         stock_code = row.get("正股代码", "")
         put_price = row.get("回售触发价", float("nan"))
+        stock_price = row.get("正股价", float("nan"))
         if not stock_code or pd.isna(put_price):
             return 0
+        # If latest stock price is already above trigger price, consecutive
+        # below-trigger days from latest backwards must be zero.
+        if pd.notna(stock_price):
+            try:
+                if float(stock_price) >= float(put_price):
+                    return 0
+            except (TypeError, ValueError):
+                pass
         return calc_put_trigger_days(str(stock_code), float(put_price))
 
     if "正股代码" in result.columns:

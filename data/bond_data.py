@@ -17,6 +17,7 @@ Data sources:
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 import akshare as ak
 import pandas as pd
@@ -80,6 +81,39 @@ _EM_FIELD_MAP = {
 }
 
 
+def _run_ak_with_timeout(func, *args, timeout: float = 15, **kwargs):
+    """Run an AKShare call with a hard timeout to avoid long hangs."""
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError:
+        logger.warning(
+            "%s timed out after %.1fs", getattr(func, "__name__", str(func)), timeout
+        )
+        future.cancel()
+        return None
+    except Exception as exc:
+        logger.warning("%s failed: %s", getattr(func, "__name__", str(func)), exc)
+        return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _normalise_security_code(code: object) -> str:
+    """Normalise stock/bond code to plain 6-digit string (without SH/SZ/BJ)."""
+    s = str(code).strip().upper()
+    if s in ("", "-", "--", "NAN", "NONE"):
+        return ""
+    s = re.sub(r"^(SH|SZ|BJ)", "", s)
+    s = re.sub(r"\.0+$", "", s)
+    m = re.search(r"(\d{1,})", s)
+    if not m:
+        return ""
+    digits = m.group(1)
+    return digits[-6:].zfill(6)
+
+
 def _fetch_em_cb_list_page(
     page: int,
     page_size: int = 500,
@@ -124,7 +158,7 @@ def _fetch_em_cb_list_page(
                     _EM_CB_LIST_URL,
                     params=params,
                     headers=_HTTP_HEADERS,
-                    timeout=30,
+                    timeout=15,
                 )
                 r.raise_for_status()
                 data = r.json()
@@ -207,7 +241,7 @@ def fetch_bond_all_list() -> pd.DataFrame:
 
         # Ensure 转债代码 is string
         if "转债代码" in df.columns:
-            df["转债代码"] = df["转债代码"].astype(str).str.strip()
+            df["转债代码"] = df["转债代码"].apply(_normalise_security_code)
 
         return df
 
@@ -224,7 +258,7 @@ def fetch_bond_spot() -> pd.DataFrame:
     Only currently listed bonds appear in this feed.
     """
     try:
-        df = ak.bond_zh_hs_cov_spot()
+        df = _run_ak_with_timeout(ak.bond_zh_hs_cov_spot, timeout=12)
         if df is None or df.empty:
             logger.warning("fetch_bond_spot: Sina API returned empty data")
             return pd.DataFrame(columns=["代码", "名称", "现价", "涨跌幅"])
@@ -277,7 +311,7 @@ def fetch_bond_comparison() -> pd.DataFrame:
     """
     # ── Primary source: AKShare bond_cov_comparison ───────────────────────
     try:
-        df = ak.bond_cov_comparison()
+        df = _run_ak_with_timeout(ak.bond_cov_comparison, timeout=15)
         if df is not None and not df.empty:
             df = df.copy()
             # AKShare's fetch_paginated_data calls pd.to_numeric on the code
@@ -286,20 +320,55 @@ def fetch_bond_comparison() -> pd.DataFrame:
             # other data sources (RPT_BOND_CB_LIST returns plain strings).
             for col in ("转债代码", "正股代码"):
                 if col in df.columns:
-                    df[col] = (
-                        df[col]
-                        .apply(
-                            lambda x: str(int(float(x))).zfill(6)
-                            if pd.notna(x) and str(x).strip() not in ("", "-", "--")
-                            else ""
-                        )
-                    )
+                    df[col] = df[col].apply(_normalise_security_code)
             logger.info(
                 "fetch_bond_comparison: primary source returned %d rows", len(df)
             )
             return df
     except Exception as exc:
         logger.warning("fetch_bond_comparison: primary source failed: %s", exc)
+
+    # ── Secondary source: Jisilu full active list (AKShare bond_cb_jsl) ────
+    logger.info("fetch_bond_comparison: trying secondary source (bond_cb_jsl)")
+    try:
+        jsl_df = _run_ak_with_timeout(ak.bond_cb_jsl, timeout=15)
+        if jsl_df is not None and not jsl_df.empty:
+            jsl_df = jsl_df.rename(
+                columns={
+                    "代码": "转债代码",
+                    "现价": "转债现价",
+                    "涨跌幅": "转债涨跌",
+                }
+            ).copy()
+            for col in ("转债代码", "正股代码"):
+                if col in jsl_df.columns:
+                    jsl_df[col] = jsl_df[col].apply(_normalise_security_code)
+            for col in [
+                "转债现价",
+                "转债涨跌",
+                "正股价",
+                "正股涨跌",
+                "正股PB",
+                "转股价",
+                "转股价值",
+                "转股溢价率",
+                "回售触发价",
+                "强赎触发价",
+                "转债占比",
+                "剩余年限",
+                "剩余规模",
+                "到期税前收益",
+            ]:
+                if col in jsl_df.columns:
+                    jsl_df[col] = pd.to_numeric(jsl_df[col], errors="coerce")
+            if "到期时间" in jsl_df.columns:
+                jsl_df["到期时间"] = pd.to_datetime(jsl_df["到期时间"], errors="coerce")
+            logger.info(
+                "fetch_bond_comparison: secondary source returned %d rows", len(jsl_df)
+            )
+            return jsl_df
+    except Exception as exc:
+        logger.warning("fetch_bond_comparison: secondary source failed: %s", exc)
 
     # ── Fallback: Eastmoney datacenter RPT_BOND_CB_LIST (active bonds only) ─
     # Uses the same stable endpoint as fetch_bond_all_list(), filtered to
@@ -380,7 +449,7 @@ def fetch_bond_redeem() -> pd.DataFrame:
     forced-redemption tracking period.
     """
     try:
-        df = ak.bond_cb_redeem_jsl()
+        df = _run_ak_with_timeout(ak.bond_cb_redeem_jsl, timeout=12)
         if df is None or df.empty:
             logger.warning("fetch_bond_redeem: JiSiLu API returned empty data")
             return pd.DataFrame()
@@ -417,12 +486,14 @@ def fetch_stock_hist(code: str, days: int = 60) -> pd.DataFrame:
         end_date = datetime.today()
         start_date = end_date - timedelta(days=days * 2)
 
-        df = ak.stock_zh_a_hist(
+        df = _run_ak_with_timeout(
+            ak.stock_zh_a_hist,
             symbol=clean_code,
             period="daily",
             start_date=start_date.strftime("%Y%m%d"),
             end_date=end_date.strftime("%Y%m%d"),
             adjust="qfq",
+            timeout=10,
         )
         if df is None or df.empty:
             return pd.DataFrame()
