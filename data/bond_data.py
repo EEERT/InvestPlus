@@ -65,19 +65,26 @@ _EM_FIELD_MAP = {
 
 
 def _fetch_em_cb_list_page(page: int, page_size: int = 500) -> dict:
-    params = {
-        "sortColumns": "PUBLIC_START_DATE",
-        "sortTypes": "-1",
-        "pageSize": str(page_size),
-        "pageNumber": str(page),
-        "reportName": "RPT_BOND_CB_LIST",
-        "columns": "ALL",
-        "quoteColumns": _EM_CB_LIST_QUOTE_COLS,
-        "source": "WEB",
-        "client": "WEB",
-    }
-    r = requests.get(_EM_CB_LIST_URL, params=params, timeout=15)
-    return r.json()
+    """Fetch one page from the Eastmoney RPT_BOND_CB_LIST API.
+    Returns an empty dict on any network or parse error.
+    """
+    try:
+        params = {
+            "sortColumns": "PUBLIC_START_DATE",
+            "sortTypes": "-1",
+            "pageSize": str(page_size),
+            "pageNumber": str(page),
+            "reportName": "RPT_BOND_CB_LIST",
+            "columns": "ALL",
+            "quoteColumns": _EM_CB_LIST_QUOTE_COLS,
+            "source": "WEB",
+            "client": "WEB",
+        }
+        r = requests.get(_EM_CB_LIST_URL, params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=300)

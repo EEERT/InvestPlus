@@ -64,6 +64,11 @@ def _fmt_numeric(df: pd.DataFrame, cols: list[str], decimals: int = 2) -> pd.Dat
     return df
 
 
+# Canonical rating order used both in the filter widget and the "其他" category logic.
+_KNOWN_RATINGS = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB"]
+_RATING_OPTIONS = _KNOWN_RATINGS + ["其他"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar – Navigation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,10 +179,9 @@ else:
             label_visibility="collapsed",
         )
 
-        rating_options = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB", "其他"]
         selected_ratings = st.multiselect(
             "债券评级",
-            options=rating_options,
+            options=_RATING_OPTIONS,
             default=[],
             placeholder="不限",
         )
@@ -274,8 +278,7 @@ else:
         main_ratings = [r for r in selected_ratings if r != "其他"]
         mask = df["债券评级"].isin(main_ratings) if main_ratings else pd.Series(False, index=df.index)
         if other_ratings:
-            known = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB"]
-            mask = mask | (~df["债券评级"].isin(known) & df["债券评级"].notna())
+            mask = mask | (~df["债券评级"].isin(_KNOWN_RATINGS) & df["债券评级"].notna())
         df = df[mask]
 
     if redeem_status == "接近强赎（10-15天）" and "强赎触发天数" in df.columns:

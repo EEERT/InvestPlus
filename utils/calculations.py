@@ -124,6 +124,11 @@ def _normalise_bond_code(code: str) -> str:
     return _strip_exchange(str(code).strip())
 
 
+# Supplementary columns fetched from RPT_BOND_CB_LIST (detail_df)
+# to merge into the active-bond comparison result.
+_DETAIL_SUPPLEMENT_COLS = ["债券评级", "到期时间", "剩余规模", "正股PB", "转债占比", "发行规模"]
+
+
 # ---------------------------------------------------------------------------
 # Data merge & enrichment
 # ---------------------------------------------------------------------------
@@ -207,7 +212,7 @@ def merge_bond_data(
         if "转债代码" in det.columns:
             det["转债代码"] = det["转债代码"].astype(str).apply(_normalise_bond_code)
 
-            extra_cols = ["债券评级", "到期时间", "剩余规模", "正股PB", "转债占比", "发行规模"]
+            extra_cols = _DETAIL_SUPPLEMENT_COLS
             available_extras = [
                 c for c in extra_cols
                 if c in det.columns and c not in result.columns
@@ -358,9 +363,13 @@ def merge_bond_data(
     if "到期时间" in result.columns:
         result["到期时间"] = pd.to_datetime(result["到期时间"], errors="coerce")
 
-    # 剩余年限 – compute from 到期时间 when available
+    # 剩余年限 – vectorised computation from 到期时间 when available
     if "到期时间" in result.columns:
-        result["剩余年限"] = result["到期时间"].apply(calc_remaining_years)
+        today_ts = pd.Timestamp(date.today())
+        days_left = (result["到期时间"] - today_ts).dt.days
+        result["剩余年限"] = (days_left / 365.25).clip(lower=0).where(
+            result["到期时间"].notna(), other=float("nan")
+        ).round(4)
     elif "剩余年限" in result.columns:
         result["剩余年限"] = pd.to_numeric(result["剩余年限"], errors="coerce")
     else:
