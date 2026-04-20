@@ -191,15 +191,15 @@ def fetch_bond_comparison() -> pd.DataFrame:
     """
     Fetch CURRENTLY TRADING convertible bonds from Eastmoney comparison table.
 
-    Uses bond_cov_comparison() which only returns bonds currently listed and
-    actively traded (approximately 338 bonds as of April 2026).
-    Does NOT fall back to bond_zh_cov() which contains historical bonds.
+    Primary source: bond_cov_comparison() (Eastmoney push2 real-time API).
+    Fallback source: RPT_BOND_CB_LIST datacenter API filtered to active bonds,
+    used when the primary source is unreachable.
 
-    Returns DataFrame with columns from bond_cov_comparison():
-    序号, 转债代码, 转债名称, 转债最新价, 转债涨跌幅, 正股代码, 正股名称,
-    正股最新价, 正股涨跌幅, 转股价, 转股价值, 转股溢价率, 纯债溢价率,
-    回售触发价, 强赎触发价, 到期赎回价, 纯债价值, 开始转股日, 上市日期, 申购日期.
+    Returns DataFrame with columns from bond_cov_comparison() when primary
+    source is available, or standardised columns from the datacenter API when
+    falling back.
     """
+    # ── Primary source: AKShare bond_cov_comparison ───────────────────────
     try:
         df = ak.bond_cov_comparison()
         if df is not None and not df.empty:
@@ -207,7 +207,48 @@ def fetch_bond_comparison() -> pd.DataFrame:
     except Exception:
         pass
 
-    return pd.DataFrame()
+    # ── Fallback: Eastmoney datacenter RPT_BOND_CB_LIST (active bonds only) ─
+    # Uses the same stable endpoint as fetch_bond_all_list(), filtered to
+    # bonds with a positive remaining balance (currently listed bonds).
+    try:
+        first = _fetch_em_cb_list_page(1)
+        result = first.get("result", {})
+        if not result:
+            return pd.DataFrame()
+
+        total_pages = result.get("pages", 1)
+        rows = result.get("data", [])
+        for p in range(2, total_pages + 1):
+            resp = _fetch_em_cb_list_page(p)
+            rows.extend(resp.get("result", {}).get("data", []))
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+
+        # Rename using the standard field map
+        rename = {}
+        for col in df.columns:
+            if col in _EM_FIELD_MAP and _EM_FIELD_MAP[col] not in rename.values():
+                rename[col] = _EM_FIELD_MAP[col]
+        df = df.rename(columns=rename)
+
+        # Numeric conversions for filtering
+        for col in ["剩余规模", "转债现价", "转股价", "转股价值",
+                    "转股溢价率", "回售触发价", "强赎触发价", "正股PB", "正股价"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Filter to currently active bonds: positive remaining balance
+        if "剩余规模" in df.columns:
+            df = df[df["剩余规模"].notna() & (df["剩余规模"] > 0)]
+        elif "转债现价" in df.columns:
+            df = df[df["转债现价"].notna() & (df["转债现价"] > 0)]
+
+        return df if not df.empty else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=120)
