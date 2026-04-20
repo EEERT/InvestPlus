@@ -1,6 +1,6 @@
 """
 Data fetching module for convertible bonds using AKShare.
-All functions are cached for 120 seconds and return empty DataFrames on failure.
+All functions are cached and return empty DataFrames on failure.
 
 Data sources:
 - bond_cov_comparison()   : Eastmoney comparison list – ONLY currently trading bonds.
@@ -14,14 +14,30 @@ Data sources:
 - bond_zh_hs_cov_spot()   : Sina real-time spot data (supplementary price feed).
 """
 
+import logging
 import re
+import time
 
 import akshare as ak
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 import streamlit as st
 from datetime import datetime, timedelta
 
+logger = logging.getLogger(__name__)
+
+# ── Common HTTP headers for direct API requests ──────────────────────────────
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://data.eastmoney.com/",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
 
 # ── Eastmoney RPT_BOND_CB_LIST direct API ─────────────────────────────────────
 
@@ -64,27 +80,69 @@ _EM_FIELD_MAP = {
 }
 
 
-def _fetch_em_cb_list_page(page: int, page_size: int = 500) -> dict:
+def _fetch_em_cb_list_page(
+    page: int,
+    page_size: int = 500,
+    *,
+    include_quotes: bool = True,
+) -> dict:
     """Fetch one page from the Eastmoney RPT_BOND_CB_LIST API.
+
+    Parameters
+    ----------
+    page : int
+        Page number (1-based).
+    page_size : int
+        Number of records per page.
+    include_quotes : bool
+        Whether to include real-time quote columns.  When the quote system
+        is unavailable this can be set to False to fetch basic data only.
+
     Returns an empty dict on any network or parse error.
     """
-    try:
-        params = {
-            "sortColumns": "PUBLIC_START_DATE",
-            "sortTypes": "-1",
-            "pageSize": str(page_size),
-            "pageNumber": str(page),
-            "reportName": "RPT_BOND_CB_LIST",
-            "columns": "ALL",
-            "quoteColumns": _EM_CB_LIST_QUOTE_COLS,
-            "source": "WEB",
-            "client": "WEB",
-        }
-        r = requests.get(_EM_CB_LIST_URL, params=params, timeout=15)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {}
+    params: dict = {
+        "sortColumns": "PUBLIC_START_DATE",
+        "sortTypes": "-1",
+        "pageSize": str(page_size),
+        "pageNumber": str(page),
+        "reportName": "RPT_BOND_CB_LIST",
+        "columns": "ALL",
+        "source": "WEB",
+        "client": "WEB",
+    }
+    if include_quotes:
+        params["quoteColumns"] = _EM_CB_LIST_QUOTE_COLS
+
+    # Retry up to 3 times with exponential back-off
+    for attempt in range(3):
+        try:
+            with requests.Session() as session:
+                adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1)
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                r = session.get(
+                    _EM_CB_LIST_URL,
+                    params=params,
+                    headers=_HTTP_HEADERS,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if data.get("result"):
+                    return data
+                # API returned a response but with no result – may be transient
+                logger.warning(
+                    "Eastmoney API page %d returned no result (attempt %d): %s",
+                    page, attempt + 1, str(data)[:300],
+                )
+        except Exception as exc:
+            logger.warning(
+                "Eastmoney API page %d attempt %d failed: %s", page, attempt + 1, exc
+            )
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+
+    return {}
 
 
 @st.cache_data(ttl=300)
@@ -100,7 +158,15 @@ def fetch_bond_all_list() -> pd.DataFrame:
     try:
         first = _fetch_em_cb_list_page(1)
         result = first.get("result", {})
+
+        # Fallback: retry without quoteColumns if the first attempt got nothing
         if not result:
+            logger.info("fetch_bond_all_list: retrying without quoteColumns")
+            first = _fetch_em_cb_list_page(1, include_quotes=False)
+            result = first.get("result", {})
+
+        if not result:
+            logger.error("fetch_bond_all_list: Eastmoney API returned no result")
             return pd.DataFrame()
 
         total_pages = result.get("pages", 1)
@@ -108,11 +174,17 @@ def fetch_bond_all_list() -> pd.DataFrame:
 
         for p in range(2, total_pages + 1):
             resp = _fetch_em_cb_list_page(p)
-            rows.extend(resp.get("result", {}).get("data", []))
+            page_data = resp.get("result", {}).get("data", [])
+            if not page_data:
+                resp = _fetch_em_cb_list_page(p, include_quotes=False)
+                page_data = resp.get("result", {}).get("data", [])
+            rows.extend(page_data)
 
         if not rows:
+            logger.error("fetch_bond_all_list: API returned 0 data rows")
             return pd.DataFrame()
 
+        logger.info("fetch_bond_all_list: fetched %d rows across %d pages", len(rows), total_pages)
         df = pd.DataFrame(rows)
 
         # Rename known fields to standard names
@@ -139,7 +211,8 @@ def fetch_bond_all_list() -> pd.DataFrame:
 
         return df
 
-    except Exception:
+    except Exception as exc:
+        logger.exception("fetch_bond_all_list failed: %s", exc)
         return pd.DataFrame()
 
 
@@ -153,6 +226,7 @@ def fetch_bond_spot() -> pd.DataFrame:
     try:
         df = ak.bond_zh_hs_cov_spot()
         if df is None or df.empty:
+            logger.warning("fetch_bond_spot: Sina API returned empty data")
             return pd.DataFrame(columns=["代码", "名称", "现价", "涨跌幅"])
 
         col_map = {}
@@ -181,8 +255,10 @@ def fetch_bond_spot() -> pd.DataFrame:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
+        logger.info("fetch_bond_spot: fetched %d rows", len(df))
         return df
-    except Exception:
+    except Exception as exc:
+        logger.warning("fetch_bond_spot failed (non-critical): %s", exc)
         return pd.DataFrame(columns=["代码", "名称", "现价", "涨跌幅"])
 
 
@@ -218,52 +294,82 @@ def fetch_bond_comparison() -> pd.DataFrame:
                             else ""
                         )
                     )
+            logger.info(
+                "fetch_bond_comparison: primary source returned %d rows", len(df)
+            )
             return df
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("fetch_bond_comparison: primary source failed: %s", exc)
 
     # ── Fallback: Eastmoney datacenter RPT_BOND_CB_LIST (active bonds only) ─
     # Uses the same stable endpoint as fetch_bond_all_list(), filtered to
     # bonds with a positive remaining balance (currently listed bonds).
-    try:
-        first = _fetch_em_cb_list_page(1)
-        result = first.get("result", {})
-        if not result:
-            return pd.DataFrame()
+    logger.info("fetch_bond_comparison: trying fallback (RPT_BOND_CB_LIST)")
+    for include_quotes in (True, False):
+        try:
+            first = _fetch_em_cb_list_page(1, include_quotes=include_quotes)
+            result = first.get("result", {})
+            if not result:
+                if include_quotes:
+                    logger.warning(
+                        "fetch_bond_comparison fallback: no result with quotes, "
+                        "retrying without"
+                    )
+                    continue
+                logger.error(
+                    "fetch_bond_comparison fallback: Eastmoney API returned no result"
+                )
+                return pd.DataFrame()
 
-        total_pages = result.get("pages", 1)
-        rows = result.get("data", [])
-        for p in range(2, total_pages + 1):
-            resp = _fetch_em_cb_list_page(p)
-            rows.extend(resp.get("result", {}).get("data", []))
+            total_pages = result.get("pages", 1)
+            rows = result.get("data", [])
+            for p in range(2, total_pages + 1):
+                resp = _fetch_em_cb_list_page(
+                    p, include_quotes=include_quotes
+                )
+                rows.extend(resp.get("result", {}).get("data", []))
 
-        if not rows:
-            return pd.DataFrame()
+            if not rows:
+                if include_quotes:
+                    continue
+                logger.error("fetch_bond_comparison fallback: 0 data rows")
+                return pd.DataFrame()
 
-        df = pd.DataFrame(rows)
+            df = pd.DataFrame(rows)
 
-        # Rename using the standard field map
-        rename = {}
-        for col in df.columns:
-            if col in _EM_FIELD_MAP and _EM_FIELD_MAP[col] not in rename.values():
-                rename[col] = _EM_FIELD_MAP[col]
-        df = df.rename(columns=rename)
+            # Rename using the standard field map
+            rename = {}
+            for col in df.columns:
+                if col in _EM_FIELD_MAP and _EM_FIELD_MAP[col] not in rename.values():
+                    rename[col] = _EM_FIELD_MAP[col]
+            df = df.rename(columns=rename)
 
-        # Numeric conversions for filtering
-        for col in ["剩余规模", "转债现价", "转股价", "转股价值",
-                    "转股溢价率", "回售触发价", "强赎触发价", "正股PB", "正股价"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+            # Numeric conversions for filtering
+            for col in ["剩余规模", "转债现价", "转股价", "转股价值",
+                        "转股溢价率", "回售触发价", "强赎触发价", "正股PB", "正股价"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Filter to currently active bonds: positive remaining balance
-        if "剩余规模" in df.columns:
-            df = df[df["剩余规模"].notna() & (df["剩余规模"] > 0)]
-        elif "转债现价" in df.columns:
-            df = df[df["转债现价"].notna() & (df["转债现价"] > 0)]
+            # Filter to currently active bonds: positive remaining balance
+            if "剩余规模" in df.columns:
+                df = df[df["剩余规模"].notna() & (df["剩余规模"] > 0)]
+            elif "转债现价" in df.columns:
+                df = df[df["转债现价"].notna() & (df["转债现价"] > 0)]
 
-        return df if not df.empty else pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+            if not df.empty:
+                logger.info(
+                    "fetch_bond_comparison fallback: %d active bonds "
+                    "(quotes=%s)", len(df), include_quotes,
+                )
+                return df
+        except Exception as exc:
+            logger.warning(
+                "fetch_bond_comparison fallback (quotes=%s) error: %s",
+                include_quotes, exc,
+            )
+
+    logger.error("fetch_bond_comparison: all sources exhausted, returning empty")
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=120)
@@ -276,9 +382,12 @@ def fetch_bond_redeem() -> pd.DataFrame:
     try:
         df = ak.bond_cb_redeem_jsl()
         if df is None or df.empty:
+            logger.warning("fetch_bond_redeem: JiSiLu API returned empty data")
             return pd.DataFrame()
+        logger.info("fetch_bond_redeem: fetched %d rows", len(df))
         return df.copy()
-    except Exception:
+    except Exception as exc:
+        logger.warning("fetch_bond_redeem failed (non-critical): %s", exc)
         return pd.DataFrame()
 
 
