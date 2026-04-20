@@ -152,7 +152,7 @@ else:
     if auto_refresh:
         try:
             from streamlit_autorefresh import st_autorefresh  # type: ignore
-            st_autorefresh(interval=120_000, key="cb_autorefresh")
+            st_autorefresh(interval=125_000, key="cb_autorefresh")
         except ImportError:
             st.sidebar.warning("streamlit-autorefresh 未安装，自动刷新不可用。")
 
@@ -216,7 +216,7 @@ else:
         df = df[df["债券评级"].isin(selected_ratings)]
 
     if redeem_status == "接近强赎（10-15天）" and "强赎触发天数" in df.columns:
-        df = df[df["强赎触发天数"].between(10, 15, inclusive="neither")]
+        df = df[df["强赎触发天数"].between(10, 15, inclusive="both")]
     elif redeem_status == "已触发强赎" and "强赎触发天数" in df.columns:
         df = df[df["强赎触发天数"] >= 15]
 
@@ -271,9 +271,9 @@ else:
     if "转股溢价率" in df.columns:
         column_config["转股溢价率"] = st.column_config.NumberColumn("转股溢价率 (%)", format="%.2f")
     if "回售触发天数" in df.columns:
-        column_config["回售触发天数"] = st.column_config.NumberColumn("回售触发天数", format="%d 天")
+        column_config["回售触发天数"] = st.column_config.NumberColumn("回售触发天数", format="%.0f 天")
     if "强赎触发天数" in df.columns:
-        column_config["强赎触发天数"] = st.column_config.NumberColumn("强赎触发天数", format="%d 天")
+        column_config["强赎触发天数"] = st.column_config.NumberColumn("强赎触发天数", format="%.0f 天")
     if "剩余年限" in df.columns:
         column_config["剩余年限"] = st.column_config.NumberColumn("剩余年限 (年)", format="%.2f")
     if "剩余规模" in df.columns:
