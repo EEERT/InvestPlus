@@ -11,6 +11,12 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# ── Logging configuration ─────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 # ── Page configuration (must be first Streamlit call) ────────────────────────
 st.set_page_config(
     page_title="InvestPlus 投资监测助手",
@@ -298,10 +304,36 @@ else:
                 fetch_bond_all_list.clear()
 
             try:
-                spot_df = fetch_bond_spot()
-                comparison_df = fetch_bond_comparison()
-                redeem_df = fetch_bond_redeem()
-                detail_df = fetch_bond_all_list()
+                # Track each data source independently for diagnostics
+                _source_status: dict[str, str] = {}
+
+                try:
+                    spot_df = fetch_bond_spot()
+                    _source_status["新浪行情"] = f"✅ {len(spot_df)} 条" if not spot_df.empty else "⚠️ 无数据"
+                except Exception as _e:
+                    spot_df = pd.DataFrame(columns=["代码", "名称", "现价", "涨跌幅"])
+                    _source_status["新浪行情"] = f"❌ {_e}"
+
+                try:
+                    comparison_df = fetch_bond_comparison()
+                    _source_status["可转债列表"] = f"✅ {len(comparison_df)} 条" if not comparison_df.empty else "⚠️ 无数据"
+                except Exception as _e:
+                    comparison_df = pd.DataFrame()
+                    _source_status["可转债列表"] = f"❌ {_e}"
+
+                try:
+                    redeem_df = fetch_bond_redeem()
+                    _source_status["强赎数据"] = f"✅ {len(redeem_df)} 条" if not redeem_df.empty else "⚠️ 无数据"
+                except Exception as _e:
+                    redeem_df = pd.DataFrame()
+                    _source_status["强赎数据"] = f"❌ {_e}"
+
+                try:
+                    detail_df = fetch_bond_all_list()
+                    _source_status["债券详情"] = f"✅ {len(detail_df)} 条" if not detail_df.empty else "⚠️ 无数据"
+                except Exception as _e:
+                    detail_df = pd.DataFrame()
+                    _source_status["债券详情"] = f"❌ {_e}"
 
                 merged = merge_bond_data(spot_df, comparison_df, redeem_df, detail_df)
                 inactive = split_active_inactive(comparison_df, detail_df)
@@ -309,12 +341,19 @@ else:
                 st.session_state["cb_data"] = merged
                 st.session_state["cb_inactive"] = inactive
                 st.session_state["cb_last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state["cb_source_status"] = _source_status
             except Exception as _load_err:
                 logging.exception("数据加载异常")
                 st.error("数据加载时发生意外错误，请检查网络连接后重试。")
 
         if not st.session_state["cb_data"].empty:
             st.success(f"数据加载成功，共 {len(st.session_state['cb_data'])} 条正在交易的可转债。")
+            # Show data source status
+            source_status = st.session_state.get("cb_source_status", {})
+            if source_status:
+                with st.expander("📡 数据源状态", expanded=False):
+                    for src, status in source_status.items():
+                        st.markdown(f"- **{src}**：{status}")
         elif st.session_state["cb_last_update"]:
             # Data was attempted but resulted in empty – give a helpful hint
             st.error(
@@ -322,6 +361,19 @@ else:
                 "可能原因：行情数据源暂时不可用或网络连接异常。\n"
                 "请稍后点击「加载 / 刷新数据」重试。"
             )
+            # Still show data source status even on failure
+            source_status = st.session_state.get("cb_source_status", {})
+            if source_status:
+                with st.expander("📡 数据源诊断信息", expanded=True):
+                    for src, status in source_status.items():
+                        st.markdown(f"- **{src}**：{status}")
+                    st.info(
+                        "💡 **排查建议**：\n"
+                        "1. 检查是否可以访问 https://data.eastmoney.com/\n"
+                        "2. 检查是否使用了 VPN 或代理（可能需要关闭或切换节点）\n"
+                        "3. 在终端查看日志输出获取详细错误信息\n"
+                        "4. 等待几分钟后重试（数据源可能临时维护）"
+                    )
 
     df: pd.DataFrame = st.session_state["cb_data"].copy()
 
