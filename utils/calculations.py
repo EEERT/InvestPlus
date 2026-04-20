@@ -249,13 +249,19 @@ def merge_bond_data(
 
         # 转股价值
         result["转股价值"] = result.apply(
-            lambda r: calc_conversion_value(r.get("正股价", float("nan")), r.get("转股价", 0)),
+            lambda r: calc_conversion_value(
+                r.get("正股价", float("nan")),
+                r.get("转股价", float("nan")),
+            ),
             axis=1,
         )
 
         # 转股溢价率
         result["转股溢价率"] = result.apply(
-            lambda r: calc_premium_rate(r.get("现价", float("nan")), r.get("转股价值") or 0),
+            lambda r: calc_premium_rate(
+                r.get("现价", float("nan")),
+                r.get("转股价值") if pd.notna(r.get("转股价值")) else 0,
+            ),
             axis=1,
         )
 

@@ -261,15 +261,15 @@ else:
     if "现价" in df.columns:
         column_config["现价"] = st.column_config.NumberColumn("现价 (元)", format="%.2f")
     if "涨跌幅" in df.columns:
-        column_config["涨跌幅"] = st.column_config.NumberColumn("涨跌幅 (%)", format="%.2f%%")
+        column_config["涨跌幅"] = st.column_config.NumberColumn("涨跌幅 (%)", format="%.2f")
     if "正股价" in df.columns:
         column_config["正股价"] = st.column_config.NumberColumn("正股价", format="%.2f")
     if "正股涨跌" in df.columns:
-        column_config["正股涨跌"] = st.column_config.NumberColumn("正股涨跌 (%)", format="%.2f%%")
+        column_config["正股涨跌"] = st.column_config.NumberColumn("正股涨跌 (%)", format="%.2f")
     if "转股价值" in df.columns:
         column_config["转股价值"] = st.column_config.NumberColumn("转股价值", format="%.2f")
     if "转股溢价率" in df.columns:
-        column_config["转股溢价率"] = st.column_config.NumberColumn("转股溢价率 (%)", format="%.2f%%")
+        column_config["转股溢价率"] = st.column_config.NumberColumn("转股溢价率 (%)", format="%.2f")
     if "回售触发天数" in df.columns:
         column_config["回售触发天数"] = st.column_config.NumberColumn("回售触发天数", format="%d 天")
     if "强赎触发天数" in df.columns:
