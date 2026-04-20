@@ -119,77 +119,153 @@ else:
         if key not in st.session_state:
             st.session_state[key] = default
 
+    # Filter defaults (session-level cache – remembered for the duration of the session)
+    _filter_defaults: dict = {
+        "filter_price_min": 80.0,
+        "filter_price_max": 200.0,
+        "filter_premium_min": -50.0,
+        "filter_premium_max": 100.0,
+        "filter_years_min": 0.0,
+        "filter_years_max": 8.0,
+        "filter_scale_max": 500.0,
+        "filter_cb_ratio_max": 100.0,
+        "filter_ytm_min": -20.0,
+        "filter_ratings": [],
+        "filter_redeem_status": [],
+    }
+    for _fk, _fv in _filter_defaults.items():
+        if _fk not in st.session_state:
+            st.session_state[_fk] = _fv
+
     # ── Sidebar filters ───────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("---")
         st.subheader("🔍 筛选条件")
 
-        price_range = st.slider(
-            "转债价格（元）",
-            min_value=50.0,
-            max_value=500.0,
-            value=(80.0, 200.0),
-            step=1.0,
-        )
-        premium_range = st.slider(
-            "转股溢价率（%）",
-            min_value=-50.0,
-            max_value=300.0,
-            value=(-50.0, 100.0),
-            step=1.0,
-        )
-        remaining_years_range = st.slider(
-            "剩余年限（年）",
+        # ── 价格区间 ──────────────────────────────────────────────────────────
+        st.markdown("**💰 价格区间（元）**")
+        _pc1, _pc2 = st.columns(2)
+        price_min = _pc1.number_input(
+            "最低 元",
             min_value=0.0,
-            max_value=8.0,
-            value=(0.0, 8.0),
+            max_value=10000.0,
+            step=1.0,
+            format="%.1f",
+            key="filter_price_min",
+        )
+        price_max = _pc2.number_input(
+            "最高 元",
+            min_value=0.0,
+            max_value=10000.0,
+            step=1.0,
+            format="%.1f",
+            key="filter_price_max",
+        )
+        if price_min > price_max:
+            st.error("⚠️ 最小值不能大于最大值", icon="🚨")
+
+        # ── 转股溢价率 ────────────────────────────────────────────────────────
+        st.markdown("**📊 转股溢价率（%）**")
+        _pr1, _pr2 = st.columns(2)
+        premium_min = _pr1.number_input(
+            "最低 %",
+            min_value=-100.0,
+            max_value=2000.0,
+            step=1.0,
+            format="%.1f",
+            key="filter_premium_min",
+        )
+        premium_max = _pr2.number_input(
+            "最高 %",
+            min_value=-100.0,
+            max_value=2000.0,
+            step=1.0,
+            format="%.1f",
+            key="filter_premium_max",
+        )
+        if premium_min > premium_max:
+            st.error("⚠️ 最小值不能大于最大值", icon="🚨")
+
+        # ── 剩余年限 ──────────────────────────────────────────────────────────
+        st.markdown("**📅 剩余年限（年）**")
+        _yr1, _yr2 = st.columns(2)
+        years_min = _yr1.number_input(
+            "最低 年",
+            min_value=0.0,
+            max_value=30.0,
             step=0.25,
+            format="%.2f",
+            key="filter_years_min",
         )
-
-        st.markdown("**剩余规模（亿元）**")
-        scale_max = st.number_input(
-            "最大规模 ≤",
+        years_max = _yr2.number_input(
+            "最高 年",
             min_value=0.0,
-            max_value=500.0,
-            value=500.0,
+            max_value=30.0,
+            step=0.25,
+            format="%.2f",
+            key="filter_years_max",
+        )
+        if years_min > years_max:
+            st.error("⚠️ 最小值不能大于最大值", icon="🚨")
+
+        # ── 剩余规模 ──────────────────────────────────────────────────────────
+        st.markdown("**💹 剩余规模 ≤（亿元）**")
+        scale_max = st.number_input(
+            "最大规模 亿元",
+            min_value=0.0,
+            max_value=5000.0,
             step=0.5,
-            help="剩余规模小于等于此值（单位：亿元）",
-            label_visibility="collapsed",
+            format="%.1f",
+            key="filter_scale_max",
+            help="设为 500 表示不限",
         )
 
-        st.markdown("**转债占比（%）**")
+        # ── 转债占比 ──────────────────────────────────────────────────────────
+        st.markdown("**📈 转债占比 ≤（%）**")
         cb_ratio_max = st.number_input(
-            "最大转债占比 ≤",
+            "最大转债占比 %",
             min_value=0.0,
             max_value=100.0,
-            value=100.0,
             step=0.5,
-            help="转债占正股流通市值的比例上限",
-            label_visibility="collapsed",
+            format="%.1f",
+            key="filter_cb_ratio_max",
+            help="设为 100 表示不限",
         )
 
-        st.markdown("**到期收益率 YTM（%）**")
+        # ── 到期收益率 YTM ────────────────────────────────────────────────────
+        st.markdown("**💰 到期收益率 YTM ≥（%）**")
         ytm_min = st.number_input(
-            "最小 YTM ≥",
-            min_value=-20.0,
-            max_value=50.0,
-            value=-20.0,
+            "最小 YTM %",
+            min_value=-100.0,
+            max_value=100.0,
             step=0.1,
-            help="到期税前收益率下限（%）；数据源提供时生效",
-            label_visibility="collapsed",
+            format="%.1f",
+            key="filter_ytm_min",
+            help="设为 -20 表示不限下限",
         )
 
+        # ── 债券评级 ──────────────────────────────────────────────────────────
         selected_ratings = st.multiselect(
-            "债券评级",
+            "🏦 债券评级",
             options=_RATING_OPTIONS,
-            default=[],
-            placeholder="不限",
+            key="filter_ratings",
+            placeholder="不限（全选）",
         )
-        redeem_status = st.selectbox(
-            "强赎状态",
-            options=["全部", "接近强赎（10-15天）", "已触发强赎"],
-            index=0,
+
+        # ── 强赎状态 ──────────────────────────────────────────────────────────
+        redeem_status_list = st.multiselect(
+            "🔔 强赎状态",
+            options=["接近强赎（10-15天）", "已触发强赎"],
+            key="filter_redeem_status",
+            placeholder="不限（全部）",
         )
+
+        st.markdown("---")
+        _count_placeholder = st.empty()
+        if st.button("🔄 重置筛选", use_container_width=True):
+            for _fk, _fv in _filter_defaults.items():
+                st.session_state[_fk] = _fv
+            st.rerun()
 
         st.markdown("---")
         auto_refresh = st.checkbox("自动刷新（120秒）", value=False)
@@ -244,23 +320,25 @@ else:
         st.stop()
 
     # ── Apply filters ─────────────────────────────────────────────────────────
-    if "现价" in df.columns:
+    _price_valid = price_min <= price_max
+    _premium_valid = premium_min <= premium_max
+    _years_valid = years_min <= years_max
+
+    if "现价" in df.columns and _price_valid:
         df = df[
-            df["现价"].between(price_range[0], price_range[1], inclusive="both")
+            df["现价"].between(price_min, price_max, inclusive="both")
             | df["现价"].isna()
         ]
 
-    if "转股溢价率" in df.columns:
+    if "转股溢价率" in df.columns and _premium_valid:
         df = df[
-            df["转股溢价率"].between(premium_range[0], premium_range[1], inclusive="both")
+            df["转股溢价率"].between(premium_min, premium_max, inclusive="both")
             | df["转股溢价率"].isna()
         ]
 
-    if "剩余年限" in df.columns:
+    if "剩余年限" in df.columns and _years_valid:
         df = df[
-            df["剩余年限"].between(
-                remaining_years_range[0], remaining_years_range[1], inclusive="both"
-            )
+            df["剩余年限"].between(years_min, years_max, inclusive="both")
             | df["剩余年限"].isna()
         ]
 
@@ -281,15 +359,25 @@ else:
             mask = mask | (~df["债券评级"].isin(_KNOWN_RATINGS) & df["债券评级"].notna())
         df = df[mask]
 
-    if redeem_status == "接近强赎（10-15天）" and "强赎触发天数" in df.columns:
-        df = df[df["强赎触发天数"].between(10, 15, inclusive="both")]
-    elif redeem_status == "已触发强赎" and "强赎触发天数" in df.columns:
-        df = df[df["强赎触发天数"] >= 15]
+    if "强赎触发天数" in df.columns and redeem_status_list:
+        _redeem_masks = []
+        if "接近强赎（10-15天）" in redeem_status_list:
+            _redeem_masks.append(df["强赎触发天数"].between(10, 15, inclusive="both"))
+        if "已触发强赎" in redeem_status_list:
+            _redeem_masks.append(df["强赎触发天数"] >= 15)
+        if _redeem_masks:
+            _combined_mask = _redeem_masks[0]
+            for _m in _redeem_masks[1:]:
+                _combined_mask = _combined_mask | _m
+            df = df[_combined_mask]
 
     # Reset sequential index after filtering
     df = df.reset_index(drop=True)
     if "序号" in df.columns:
         df["序号"] = range(1, len(df) + 1)
+
+    # Update sidebar real-time count
+    _count_placeholder.success(f"🎯 符合条件：**{len(df)}** 只")
 
     # ── Round numeric columns ─────────────────────────────────────────────────
     df = _fmt_numeric(
