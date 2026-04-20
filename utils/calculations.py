@@ -120,8 +120,15 @@ def _strip_exchange(code: str) -> str:
 
 
 def _normalise_bond_code(code: str) -> str:
-    """Strip exchange prefix AND leading/trailing whitespace."""
-    return _strip_exchange(str(code).strip())
+    """Strip exchange prefix, whitespace and float suffix from a bond/stock code.
+
+    Handles float-formatted codes produced when AKShare's fetch_paginated_data
+    runs pd.to_numeric on the code field (e.g. 110044.0 → '110044').
+    """
+    s = str(code).strip()
+    # Remove trailing ".0" (or ".00" etc.) left by float → str conversion
+    s = re.sub(r"\.0+$", "", s)
+    return _strip_exchange(s)
 
 
 # Supplementary columns fetched from RPT_BOND_CB_LIST (detail_df)
