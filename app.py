@@ -19,8 +19,13 @@ st.set_page_config(
 )
 
 # ── Local imports ─────────────────────────────────────────────────────────────
-from data.bond_data import fetch_bond_comparison, fetch_bond_redeem, fetch_bond_spot
-from utils.calculations import merge_bond_data
+from data.bond_data import (
+    fetch_bond_all_list,
+    fetch_bond_comparison,
+    fetch_bond_redeem,
+    fetch_bond_spot,
+)
+from utils.calculations import merge_bond_data, split_active_inactive
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,10 +106,13 @@ else:
     st.title("🔄 可转债监测")
 
     # ── Session state initialisation ─────────────────────────────────────────
-    if "cb_data" not in st.session_state:
-        st.session_state["cb_data"] = pd.DataFrame()
-    if "cb_last_update" not in st.session_state:
-        st.session_state["cb_last_update"] = None
+    for key, default in [
+        ("cb_data", pd.DataFrame()),
+        ("cb_inactive", pd.DataFrame()),
+        ("cb_last_update", None),
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
 
     # ── Sidebar filters ───────────────────────────────────────────────────────
     with st.sidebar:
@@ -112,26 +120,60 @@ else:
         st.subheader("🔍 筛选条件")
 
         price_range = st.slider(
-            "现价范围（元）",
-            min_value=80.0,
-            max_value=300.0,
+            "转债价格（元）",
+            min_value=50.0,
+            max_value=500.0,
             value=(80.0, 200.0),
             step=1.0,
         )
         premium_range = st.slider(
             "转股溢价率（%）",
             min_value=-50.0,
-            max_value=200.0,
-            value=(-50.0, 80.0),
+            max_value=300.0,
+            value=(-50.0, 100.0),
             step=1.0,
         )
-        remaining_years = st.slider(
+        remaining_years_range = st.slider(
             "剩余年限（年）",
             min_value=0.0,
             max_value=8.0,
             value=(0.0, 8.0),
-            step=0.5,
+            step=0.25,
         )
+
+        st.markdown("**剩余规模（亿元）**")
+        scale_max = st.number_input(
+            "最大规模 ≤",
+            min_value=0.0,
+            max_value=500.0,
+            value=500.0,
+            step=0.5,
+            help="剩余规模小于等于此值（单位：亿元）",
+            label_visibility="collapsed",
+        )
+
+        st.markdown("**转债占比（%）**")
+        cb_ratio_max = st.number_input(
+            "最大转债占比 ≤",
+            min_value=0.0,
+            max_value=100.0,
+            value=100.0,
+            step=0.5,
+            help="转债占正股流通市值的比例上限",
+            label_visibility="collapsed",
+        )
+
+        st.markdown("**到期收益率 YTM（%）**")
+        ytm_min = st.number_input(
+            "最小 YTM ≥",
+            min_value=-20.0,
+            max_value=50.0,
+            value=-20.0,
+            step=0.1,
+            help="到期税前收益率下限（%）；数据源提供时生效",
+            label_visibility="collapsed",
+        )
+
         rating_options = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB", "其他"]
         selected_ratings = st.multiselect(
             "债券评级",
@@ -168,24 +210,28 @@ else:
     # ── Data loading ──────────────────────────────────────────────────────────
     if load_btn or st.session_state["cb_data"].empty:
         with st.spinner("正在获取数据，请稍候…"):
-            # Clear caches to force refresh when button is clicked
             if load_btn:
                 fetch_bond_spot.clear()
                 fetch_bond_comparison.clear()
                 fetch_bond_redeem.clear()
+                fetch_bond_all_list.clear()
 
             spot_df = fetch_bond_spot()
             comparison_df = fetch_bond_comparison()
             redeem_df = fetch_bond_redeem()
+            detail_df = fetch_bond_all_list()
 
-            merged = merge_bond_data(spot_df, comparison_df, redeem_df)
+            merged = merge_bond_data(spot_df, comparison_df, redeem_df, detail_df)
+            inactive = split_active_inactive(comparison_df, detail_df)
+
             st.session_state["cb_data"] = merged
+            st.session_state["cb_inactive"] = inactive
             st.session_state["cb_last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if st.session_state["cb_data"].empty:
             st.error("数据加载失败，请检查网络连接后重试。")
         else:
-            st.success(f"数据加载成功，共 {len(st.session_state['cb_data'])} 条记录。")
+            st.success(f"数据加载成功，共 {len(st.session_state['cb_data'])} 条正在交易的可转债。")
 
     df: pd.DataFrame = st.session_state["cb_data"].copy()
 
@@ -208,12 +254,29 @@ else:
 
     if "剩余年限" in df.columns:
         df = df[
-            df["剩余年限"].between(remaining_years[0], remaining_years[1], inclusive="both")
+            df["剩余年限"].between(
+                remaining_years_range[0], remaining_years_range[1], inclusive="both"
+            )
             | df["剩余年限"].isna()
         ]
 
+    if "剩余规模" in df.columns and scale_max < 500.0:
+        df = df[df["剩余规模"].isna() | (df["剩余规模"] <= scale_max)]
+
+    if "转债占比" in df.columns and cb_ratio_max < 100.0:
+        df = df[df["转债占比"].isna() | (df["转债占比"] <= cb_ratio_max)]
+
+    if "到期税前收益" in df.columns and ytm_min > -20.0:
+        df = df[df["到期税前收益"].isna() | (df["到期税前收益"] >= ytm_min)]
+
     if selected_ratings and "债券评级" in df.columns:
-        df = df[df["债券评级"].isin(selected_ratings)]
+        other_ratings = [r for r in selected_ratings if r == "其他"]
+        main_ratings = [r for r in selected_ratings if r != "其他"]
+        mask = df["债券评级"].isin(main_ratings) if main_ratings else pd.Series(False, index=df.index)
+        if other_ratings:
+            known = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB"]
+            mask = mask | (~df["债券评级"].isin(known) & df["债券评级"].notna())
+        df = df[mask]
 
     if redeem_status == "接近强赎（10-15天）" and "强赎触发天数" in df.columns:
         df = df[df["强赎触发天数"].between(10, 15, inclusive="both")]
@@ -228,13 +291,14 @@ else:
     # ── Round numeric columns ─────────────────────────────────────────────────
     df = _fmt_numeric(
         df,
-        ["现价", "正股价", "正股PB", "转股价", "转股价值", "转股溢价率", "回售触发价", "强赎触发价", "剩余年限", "剩余规模"],
+        ["现价", "正股价", "正股PB", "转股价", "转股价值", "转股溢价率",
+         "回售触发价", "强赎触发价", "剩余年限", "剩余规模", "转债占比"],
     )
     df = _fmt_numeric(df, ["涨跌幅", "正股涨跌"], decimals=2)
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("可转债数量", len(df))
+    m1.metric("筛选后数量", len(df))
 
     if "转股溢价率" in df.columns:
         avg_premium = df["转股溢价率"].mean()
@@ -266,10 +330,14 @@ else:
         column_config["正股价"] = st.column_config.NumberColumn("正股价", format="%.2f")
     if "正股涨跌" in df.columns:
         column_config["正股涨跌"] = st.column_config.NumberColumn("正股涨跌 (%)", format="%.2f")
+    if "正股PB" in df.columns:
+        column_config["正股PB"] = st.column_config.NumberColumn("正股PB", format="%.2f")
     if "转股价值" in df.columns:
         column_config["转股价值"] = st.column_config.NumberColumn("转股价值", format="%.2f")
     if "转股溢价率" in df.columns:
         column_config["转股溢价率"] = st.column_config.NumberColumn("转股溢价率 (%)", format="%.2f")
+    if "转债占比" in df.columns:
+        column_config["转债占比"] = st.column_config.NumberColumn("转债占比 (%)", format="%.2f")
     if "回售触发天数" in df.columns:
         column_config["回售触发天数"] = st.column_config.NumberColumn("回售触发天数", format="%.0f 天")
     if "强赎触发天数" in df.columns:
@@ -289,7 +357,6 @@ else:
             hide_index=True,
         )
     except Exception:
-        # Fallback without styling if styler fails
         st.dataframe(
             df,
             use_container_width=True,
@@ -315,3 +382,29 @@ else:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+
+    # ── Inactive / historical bonds table ────────────────────────────────────
+    inactive_df: pd.DataFrame = st.session_state.get("cb_inactive", pd.DataFrame())
+    if not inactive_df.empty:
+        with st.expander(
+            f"📋 历史及未上市可转债（{len(inactive_df)} 只）— 已强赎/退市/到期/未上市",
+            expanded=False,
+        ):
+            st.info(
+                "以下可转债当前不在交易所正常交易，包括已强赎、已退市、已到期或尚未上市的品种。",
+                icon="ℹ️",
+            )
+            st.dataframe(
+                inactive_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+            inactive_excel = to_excel_bytes(inactive_df)
+            st.download_button(
+                label="📥 导出历史转债 Excel",
+                data=inactive_excel,
+                file_name=f"历史转债_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    elif st.session_state["cb_last_update"]:
+        st.caption("📋 未加载到历史转债数据（历史数据源暂不可用）")

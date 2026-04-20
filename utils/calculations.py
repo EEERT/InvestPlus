@@ -5,7 +5,7 @@ Calculation utilities for InvestPlus investment monitoring.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 
 import pandas as pd
@@ -41,23 +41,41 @@ def calc_premium_rate(bond_price: float, conversion_value: float) -> Optional[fl
     return None
 
 
+def calc_remaining_years(maturity: object) -> Optional[float]:
+    """
+    Calculate remaining years to maturity from today.
+    Accepts datetime, date, Timestamp or string.
+    Returns 0.0 if maturity has already passed, None if maturity is null/unparseable.
+    """
+    try:
+        if maturity is None:
+            return None
+        if isinstance(maturity, float) and pd.isna(maturity):
+            return None
+        if isinstance(maturity, pd.Timestamp):
+            if pd.isna(maturity):
+                return None
+            maturity = maturity.date()
+        elif isinstance(maturity, datetime):
+            maturity = maturity.date()
+        elif isinstance(maturity, str):
+            ts = pd.to_datetime(maturity, errors="coerce")
+            if pd.isna(ts):
+                return None
+            maturity = ts.date()
+
+        today = date.today()
+        delta = (maturity - today).days
+        return round(delta / 365.25, 4) if delta > 0 else 0.0
+    except Exception:
+        return None
+
+
 def calc_put_trigger_days(stock_code: str, put_trigger_price: float) -> int:
     """
     Count consecutive trading days (from most recent backwards) where the
     closing price is below `put_trigger_price`.
-
-    Parameters
-    ----------
-    stock_code : str
-        A-share stock code (exchange prefix is handled inside fetch_stock_hist).
-    put_trigger_price : float
-        The put (回售) trigger price threshold.
-
-    Returns
-    -------
-    int – number of consecutive recent days below the trigger price (0 if none).
     """
-    # Import here to avoid circular imports
     from data.bond_data import fetch_stock_hist  # noqa: PLC0415
 
     try:
@@ -101,6 +119,11 @@ def _strip_exchange(code: str) -> str:
     return str(code)
 
 
+def _normalise_bond_code(code: str) -> str:
+    """Strip exchange prefix AND leading/trailing whitespace."""
+    return _strip_exchange(str(code).strip())
+
+
 # ---------------------------------------------------------------------------
 # Data merge & enrichment
 # ---------------------------------------------------------------------------
@@ -109,10 +132,25 @@ def merge_bond_data(
     spot_df: pd.DataFrame,
     comparison_df: pd.DataFrame,
     redeem_df: pd.DataFrame,
+    detail_df: "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """
-    Merge spot, comparison and redemption DataFrames, compute all derived
-    fields and return a final DataFrame with standardised column names.
+    Merge spot, comparison, redemption and (optional) detail DataFrames,
+    compute all derived fields and return a final DataFrame with standardised
+    column names.
+
+    Parameters
+    ----------
+    spot_df       : Sina real-time spot data (optional price supplement).
+    comparison_df : Eastmoney comparison table – ONLY currently trading bonds.
+                    Columns from bond_cov_comparison():
+                      转债代码, 转债名称, 转债最新价, 转债涨跌幅,
+                      正股代码, 正股名称, 正股最新价, 正股涨跌幅,
+                      转股价, 转股价值, 转股溢价率, 纯债溢价率,
+                      回售触发价, 强赎触发价, …
+    redeem_df     : JiSiLu forced-redemption countdown.
+    detail_df     : Eastmoney RPT_BOND_CB_LIST with extra fields (optional).
+                    Provides: 债券评级, 到期时间, 剩余规模, 正股PB, etc.
 
     Output columns
     --------------
@@ -122,50 +160,31 @@ def merge_bond_data(
     剩余年限, 剩余规模
     """
 
-    # ── 1. Normalise spot DataFrame ────────────────────────────────────────
-    if spot_df is None or spot_df.empty:
-        spot_norm = pd.DataFrame(columns=["转债代码", "现价", "涨跌幅"])
-    else:
-        spot_norm = spot_df.copy()
-        code_col = _find_col(spot_norm, ["代码", "bond_id", "code"])
-        price_col = _find_col(spot_norm, ["现价", "最新价", "close", "price"])
-        chg_col = _find_col(spot_norm, ["涨跌幅", "change_pct", "pct_chg"])
-
-        rename = {}
-        if code_col:
-            rename[code_col] = "转债代码_spot"
-        if price_col:
-            rename[price_col] = "现价_spot"
-        if chg_col:
-            rename[chg_col] = "涨跌幅_spot"
-        spot_norm = spot_norm.rename(columns=rename)
-
-        if "转债代码_spot" in spot_norm.columns:
-            spot_norm["转债代码_spot"] = spot_norm["转债代码_spot"].astype(str).apply(_strip_exchange)
-
-    # ── 2. Normalise comparison DataFrame ─────────────────────────────────
+    # ── 1. Normalise comparison DataFrame (currently trading bonds only) ──
     if comparison_df is None or comparison_df.empty:
         result = pd.DataFrame()
     else:
         result = comparison_df.copy()
 
-        # Flexible column mapping for comparison data
+        # Explicit mapping: bond_cov_comparison() exact column names → targets
         comp_col_map = {
             "转债代码": ["转债代码", "bond_code", "cb_code", "代码", "债券代码"],
             "转债名称": ["转债名称", "bond_name", "cb_name", "名称", "债券简称"],
-            "正股名称": ["正股名称", "stock_name", "正股", "正股简称"],
-            "正股价": ["正股现价", "正股价", "stock_price", "正股最新价"],
+            "正股代码": ["正股代码", "stock_code"],
+            "正股名称": ["正股名称", "stock_name", "正股简称"],
+            "正股价": ["正股最新价", "正股现价", "正股价", "stock_price"],
             "正股涨跌": ["正股涨跌幅", "正股涨跌", "stock_change", "stock_pct"],
-            "正股PB": ["正股PB", "pb", "PB", "市净率"],
-            "转股价": ["转股价", "conversion_price", "转股价格"],
-            "债券评级": ["债券评级", "rating", "评级", "bond_rating", "信用评级"],
-            "回售触发价": ["回售触发价", "put_trigger", "回售价格", "回售触发价格"],
-            "强赎触发价": ["强赎触发价", "redeem_trigger", "强赎价格", "强赎触发价格"],
-            "转债现价": ["转债最新价", "转债现价", "债现价"],
+            "正股PB": ["正股PB", "PBV_RATIO", "pb", "PB", "市净率"],
+            "转股价": ["转股价", "conversion_price", "转股价格", "TRANSFER_PRICE"],
+            "转股价值": ["转股价值", "conversion_value", "TRANSFER_VALUE"],
+            "转股溢价率": ["转股溢价率", "premium_rate", "TRANSFER_PREMIUM_RATIO"],
+            "债券评级": ["债券评级", "rating", "评级", "bond_rating", "信用评级", "CREDIT_RATING"],
+            "回售触发价": ["回售触发价", "put_trigger", "回售价格", "RESALE_TRIG_PRICE"],
+            "强赎触发价": ["强赎触发价", "redeem_trigger", "强赎价格", "REDEEM_TRIG_PRICE"],
+            "转债现价": ["转债最新价", "转债现价", "债现价", "CURRENT_BOND_PRICE"],
             "转债涨跌": ["转债涨跌幅", "转债涨跌"],
-            "转债剩余规模": ["转债剩余规模", "余额", "剩余规模", "remaining_size"],
-            "到期时间": ["到期时间", "maturity", "到期日", "maturity_date"],
-            "剩余年限": ["剩余年限", "remaining_years", "years_to_maturity"],
+            "到期时间": ["到期时间", "到期日", "maturity", "MATURITY_DATE", "EXPIRE_DATE"],
+            "剩余规模": ["剩余规模", "转债剩余规模", "余额", "CURR_ISS_AMT", "remaining_size"],
             "转债占比": ["转债占比", "cb_ratio", "占比"],
         }
 
@@ -177,59 +196,92 @@ def merge_bond_data(
         result = result.rename(columns=rename)
 
         if "转债代码" in result.columns:
-            result["转债代码"] = result["转债代码"].astype(str).apply(_strip_exchange)
+            result["转债代码"] = result["转债代码"].astype(str).apply(_normalise_bond_code)
 
-    # ── 3. Merge spot into comparison ──────────────────────────────────────
-    if not result.empty and "转债代码_spot" in spot_norm.columns:
-        spot_merge = spot_norm[
-            [c for c in ["转债代码_spot", "现价_spot", "涨跌幅_spot"] if c in spot_norm.columns]
-        ].copy()
-        if "转债代码" in result.columns:
-            result = result.merge(
-                spot_merge,
-                left_on="转债代码",
-                right_on="转债代码_spot",
-                how="left",
+    if result.empty:
+        return pd.DataFrame(columns=["序号", "转债代码", "转债名称", "现价", "涨跌幅"])
+
+    # ── 2. Merge detail_df (supplementary fields: rating, maturity, PB, etc.) ─
+    if detail_df is not None and not detail_df.empty:
+        det = detail_df.copy()
+        if "转债代码" in det.columns:
+            det["转债代码"] = det["转债代码"].astype(str).apply(_normalise_bond_code)
+
+            extra_cols = ["债券评级", "到期时间", "剩余规模", "正股PB", "转债占比", "发行规模"]
+            available_extras = [
+                c for c in extra_cols
+                if c in det.columns and c not in result.columns
+            ]
+            if available_extras:
+                det_merge = det[["转债代码"] + available_extras].drop_duplicates("转债代码")
+                result = result.merge(det_merge, on="转债代码", how="left")
+
+    # ── 3. Merge spot data (real-time price supplement) ───────────────────
+    if spot_df is not None and not spot_df.empty:
+        spot_norm = spot_df.copy()
+        code_col = _find_col(spot_norm, ["代码", "bond_id", "code"])
+        price_col = _find_col(spot_norm, ["现价", "最新价", "close", "price"])
+        chg_col = _find_col(spot_norm, ["涨跌幅", "change_pct", "pct_chg"])
+
+        spot_rename = {}
+        if code_col:
+            spot_rename[code_col] = "转债代码_spot"
+        if price_col:
+            spot_rename[price_col] = "现价_spot"
+        if chg_col:
+            spot_rename[chg_col] = "涨跌幅_spot"
+        spot_norm = spot_norm.rename(columns=spot_rename)
+
+        if "转债代码_spot" in spot_norm.columns:
+            spot_norm["转债代码_spot"] = (
+                spot_norm["转债代码_spot"].astype(str).apply(_normalise_bond_code)
             )
-            result = result.drop(columns=["转债代码_spot"], errors="ignore")
+            spot_merge = spot_norm[
+                [c for c in ["转债代码_spot", "现价_spot", "涨跌幅_spot"] if c in spot_norm.columns]
+            ].copy()
+            if "转债代码" in result.columns:
+                result = result.merge(
+                    spot_merge,
+                    left_on="转债代码",
+                    right_on="转债代码_spot",
+                    how="left",
+                )
+                result = result.drop(columns=["转债代码_spot"], errors="ignore")
 
-        # Prefer spot price when available
-        if "现价_spot" in result.columns:
-            if "转债现价" not in result.columns:
-                result["转债现价"] = pd.to_numeric(result.get("现价_spot"), errors="coerce")
-            result["现价"] = result["现价_spot"].combine_first(
-                pd.to_numeric(result.get("转债现价", pd.Series(dtype=float)), errors="coerce")
-            )
-            result = result.drop(columns=["现价_spot"], errors="ignore")
-        elif "转债现价" in result.columns:
-            result["现价"] = pd.to_numeric(result["转债现价"], errors="coerce")
+    # Resolve price: prefer spot, then comparison
+    if "现价_spot" in result.columns:
+        comp_price = pd.to_numeric(
+            result.get("转债现价", pd.Series(dtype=float)), errors="coerce"
+        )
+        result["现价"] = (
+            pd.to_numeric(result["现价_spot"], errors="coerce").combine_first(comp_price)
+        )
+        result = result.drop(columns=["现价_spot"], errors="ignore")
+    elif "转债现价" in result.columns:
+        result["现价"] = pd.to_numeric(result["转债现价"], errors="coerce")
+    elif "现价" not in result.columns:
+        result["现价"] = float("nan")
 
-        if "涨跌幅_spot" in result.columns:
-            result["涨跌幅"] = result["涨跌幅_spot"]
-            result = result.drop(columns=["涨跌幅_spot"], errors="ignore")
-
-    elif not result.empty:
-        # Fall back to comparison's own price column
-        for c in ["转债现价", "现价"]:
-            if c in result.columns:
-                result["现价"] = pd.to_numeric(result[c], errors="coerce")
-                break
-
-        # Fall back to comparison's own change column
-        if "涨跌幅" not in result.columns and "转债涨跌" in result.columns:
+    # Resolve change pct
+    if "涨跌幅_spot" in result.columns:
+        result["涨跌幅"] = pd.to_numeric(result["涨跌幅_spot"], errors="coerce")
+        result = result.drop(columns=["涨跌幅_spot"], errors="ignore")
+    elif "涨跌幅" not in result.columns:
+        if "转债涨跌" in result.columns:
             result["涨跌幅"] = pd.to_numeric(result["转债涨跌"], errors="coerce")
+        else:
+            result["涨跌幅"] = float("nan")
 
     # ── 4. Merge forced-redemption progress ───────────────────────────────
-    if not redeem_df.empty and not result.empty:
+    if redeem_df is not None and not redeem_df.empty and not result.empty:
         redeem_norm = redeem_df.copy()
-        code_col_r = _find_col(redeem_norm, ["转债代码", "bond_code", "代码"])
+        code_col_r = _find_col(redeem_norm, ["代码", "转债代码", "bond_code"])
         days_col_r = _find_col(
             redeem_norm,
-            ["已满足天数", "满足天数", "强赎天数", "redeem_days", "days", "强赎天计数"],
+            ["强赎天计数", "已满足天数", "满足天数", "强赎天数", "redeem_days", "days"],
         )
         if code_col_r and days_col_r:
             redeem_norm = redeem_norm[[code_col_r, days_col_r]].copy()
-            # Extract leading integer from strings like "15/15 | 15" → 15
             redeem_norm[days_col_r] = pd.to_numeric(
                 redeem_norm[days_col_r]
                 .astype(str)
@@ -239,7 +291,9 @@ def merge_bond_data(
             redeem_norm = redeem_norm.rename(
                 columns={code_col_r: "转债代码_r", days_col_r: "强赎触发天数_r"}
             )
-            redeem_norm["转债代码_r"] = redeem_norm["转债代码_r"].astype(str).apply(_strip_exchange)
+            redeem_norm["转债代码_r"] = (
+                redeem_norm["转债代码_r"].astype(str).apply(_normalise_bond_code)
+            )
             if "转债代码" in result.columns:
                 result = result.merge(
                     redeem_norm,
@@ -248,17 +302,19 @@ def merge_bond_data(
                     how="left",
                 )
                 result = result.drop(columns=["转债代码_r"], errors="ignore")
-                result["强赎触发天数"] = pd.to_numeric(result["强赎触发天数_r"], errors="coerce")
+                result["强赎触发天数"] = pd.to_numeric(
+                    result["强赎触发天数_r"], errors="coerce"
+                )
                 result = result.drop(columns=["强赎触发天数_r"], errors="ignore")
 
     # ── 5. Compute derived fields ──────────────────────────────────────────
-    if not result.empty:
-        # Numeric conversions
-        for col in ["现价", "正股价", "正股涨跌", "正股PB", "转股价", "回售触发价", "强赎触发价"]:
-            if col in result.columns:
-                result[col] = pd.to_numeric(result[col], errors="coerce")
+    # Numeric conversions
+    for col in ["现价", "正股价", "正股涨跌", "正股PB", "转股价", "回售触发价", "强赎触发价"]:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors="coerce")
 
-        # 转股价值
+    # 转股价值 – recompute from 正股价/转股价 when the column is all NaN
+    if "转股价值" not in result.columns or result["转股价值"].isna().all():
         result["转股价值"] = result.apply(
             lambda r: calc_conversion_value(
                 r.get("正股价", float("nan")),
@@ -266,8 +322,11 @@ def merge_bond_data(
             ),
             axis=1,
         )
+    else:
+        result["转股价值"] = pd.to_numeric(result["转股价值"], errors="coerce")
 
-        # 转股溢价率
+    # 转股溢价率 – recompute when the column is all NaN
+    if "转股溢价率" not in result.columns or result["转股溢价率"].isna().all():
         result["转股溢价率"] = result.apply(
             lambda r: calc_premium_rate(
                 r.get("现价", float("nan")),
@@ -275,67 +334,131 @@ def merge_bond_data(
             ),
             axis=1,
         )
+    else:
+        result["转股溢价率"] = pd.to_numeric(result["转股溢价率"], errors="coerce")
 
-        # 强赎触发天数 – if not merged from redeem_df, default to NaN
-        if "强赎触发天数" not in result.columns:
-            result["强赎触发天数"] = float("nan")
+    # 强赎触发天数 – default to NaN if not yet merged
+    if "强赎触发天数" not in result.columns:
+        result["强赎触发天数"] = float("nan")
 
-        # 回售触发天数 – calculated from stock history
-        def _put_days(row: pd.Series) -> int:
-            stock_code = row.get("正股代码", "")
-            put_price = row.get("回售触发价", float("nan"))
-            if not stock_code or pd.isna(put_price):
-                return 0
-            return calc_put_trigger_days(str(stock_code), float(put_price))
+    # 回售触发天数 – calculated from stock closing price history
+    def _put_days(row: pd.Series) -> int:
+        stock_code = row.get("正股代码", "")
+        put_price = row.get("回售触发价", float("nan"))
+        if not stock_code or pd.isna(put_price):
+            return 0
+        return calc_put_trigger_days(str(stock_code), float(put_price))
 
-        # Only compute if we have stock codes; otherwise leave as 0
-        if "正股代码" in result.columns:
-            result["回售触发天数"] = result.apply(_put_days, axis=1)
+    if "正股代码" in result.columns:
+        result["回售触发天数"] = result.apply(_put_days, axis=1)
+    else:
+        result["回售触发天数"] = 0
+
+    # 到期时间 → normalise to datetime
+    if "到期时间" in result.columns:
+        result["到期时间"] = pd.to_datetime(result["到期时间"], errors="coerce")
+
+    # 剩余年限 – compute from 到期时间 when available
+    if "到期时间" in result.columns:
+        result["剩余年限"] = result["到期时间"].apply(calc_remaining_years)
+    elif "剩余年限" in result.columns:
+        result["剩余年限"] = pd.to_numeric(result["剩余年限"], errors="coerce")
+    else:
+        result["剩余年限"] = float("nan")
+
+    # 剩余规模 numeric
+    if "剩余规模" in result.columns:
+        result["剩余规模"] = pd.to_numeric(result["剩余规模"], errors="coerce")
+    else:
+        result["剩余规模"] = float("nan")
+
+    # 转债占比 numeric
+    if "转债占比" in result.columns:
+        result["转债占比"] = pd.to_numeric(result["转债占比"], errors="coerce")
+
+    # Ensure all required output columns exist (fill with None/NaN if absent)
+    for col in [
+        "转债名称", "正股名称", "正股价", "正股涨跌", "正股PB",
+        "转股价", "债券评级", "回售触发价", "强赎触发价",
+        "转债占比", "到期时间", "剩余年限",
+    ]:
+        if col not in result.columns:
+            result[col] = None
+
+    if "涨跌幅" not in result.columns:
+        if "转债涨跌" in result.columns:
+            result["涨跌幅"] = pd.to_numeric(result["转债涨跌"], errors="coerce")
         else:
-            result["回售触发天数"] = 0
+            result["涨跌幅"] = float("nan")
 
-        # 剩余年限 numeric
-        if "剩余年限" in result.columns:
-            result["剩余年限"] = pd.to_numeric(result["剩余年限"], errors="coerce")
+    # ── 6. Select & rename final columns ──────────────────────────────────
+    final_cols = [
+        "转债代码", "转债名称", "现价", "涨跌幅", "正股名称",
+        "正股价", "正股涨跌", "正股PB", "转股价", "转股价值",
+        "转股溢价率", "债券评级", "回售触发价", "回售触发天数",
+        "强赎触发价", "强赎触发天数", "转债占比", "到期时间",
+        "剩余年限", "剩余规模",
+    ]
+    available = [c for c in final_cols if c in result.columns]
+    result = result[available].reset_index(drop=True)
 
-        # 剩余规模 numeric
-        for c in ["转债剩余规模", "剩余规模"]:
-            if c in result.columns:
-                result["剩余规模"] = pd.to_numeric(result[c], errors="coerce")
-                break
-        if "剩余规模" not in result.columns:
-            result["剩余规模"] = float("nan")
+    # Format 到期时间 as date string for display
+    if "到期时间" in result.columns:
+        dt_col = pd.to_datetime(result["到期时间"], errors="coerce")
+        result["到期时间"] = dt_col.dt.strftime("%Y-%m-%d").where(dt_col.notna(), other=None)
 
-        # Ensure all required output columns exist
-        for col in [
-            "转债名称", "正股名称", "正股价", "正股涨跌", "正股PB",
-            "转股价", "债券评级", "回售触发价", "强赎触发价",
-            "转债占比", "到期时间", "剩余年限",
-        ]:
-            if col not in result.columns:
-                result[col] = None
+    # Add sequential index
+    result.insert(0, "序号", range(1, len(result) + 1))
 
-        if "涨跌幅" not in result.columns:
-            # Use comparison data's own change column if available
-            if "转债涨跌" in result.columns:
-                result["涨跌幅"] = pd.to_numeric(result["转债涨跌"], errors="coerce")
-            else:
-                result["涨跌幅"] = float("nan")
+    return result
 
-        # ── 6. Select & rename final columns ──────────────────────────────
-        final_cols = [
-            "转债代码", "转债名称", "现价", "涨跌幅", "正股名称",
-            "正股价", "正股涨跌", "正股PB", "转股价", "转股价值",
-            "转股溢价率", "债券评级", "回售触发价", "回售触发天数",
-            "强赎触发价", "强赎触发天数", "转债占比", "到期时间",
-            "剩余年限", "剩余规模",
-        ]
-        available = [c for c in final_cols if c in result.columns]
-        result = result[available].reset_index(drop=True)
 
-        # Add sequential index
-        result.insert(0, "序号", range(1, len(result) + 1))
+def split_active_inactive(
+    comparison_df: pd.DataFrame,
+    all_list_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Derive a DataFrame of INACTIVE bonds = all_list_df minus currently active.
 
-    return result if not result.empty else pd.DataFrame(
-        columns=["序号", "转债代码", "转债名称", "现价", "涨跌幅"]
-    )
+    Parameters
+    ----------
+    comparison_df : Currently trading bonds (from bond_cov_comparison()).
+    all_list_df   : All bonds ever listed (from fetch_bond_all_list()).
+
+    Returns
+    -------
+    DataFrame of inactive bonds with basic display columns.
+    """
+    if all_list_df is None or all_list_df.empty:
+        return pd.DataFrame()
+
+    active_codes: set = set()
+    if comparison_df is not None and not comparison_df.empty:
+        code_col = _find_col(comparison_df, ["转债代码", "bond_code", "代码"])
+        if code_col:
+            active_codes = {
+                _normalise_bond_code(c)
+                for c in comparison_df[code_col].astype(str)
+            }
+
+    det = all_list_df.copy()
+    if "转债代码" not in det.columns:
+        return pd.DataFrame()
+
+    det["_code_norm"] = det["转债代码"].astype(str).apply(_normalise_bond_code)
+    inactive = det[~det["_code_norm"].isin(active_codes)].copy()
+    inactive = inactive.drop(columns=["_code_norm"], errors="ignore")
+
+    cols_wanted = [
+        "转债代码", "转债名称", "上市时间", "到期时间", "债券评级",
+        "发行规模", "剩余规模", "转股价", "正股代码", "正股名称",
+    ]
+    available = [c for c in cols_wanted if c in inactive.columns]
+    inactive = inactive[available].reset_index(drop=True)
+
+    for dc in ["上市时间", "到期时间"]:
+        if dc in inactive.columns:
+            inactive[dc] = pd.to_datetime(inactive[dc], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    inactive.insert(0, "序号", range(1, len(inactive) + 1))
+    return inactive
