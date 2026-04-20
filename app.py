@@ -5,6 +5,7 @@ InvestPlus 投资监测助手 – Main Streamlit Application
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime
 
 import pandas as pd
@@ -296,22 +297,31 @@ else:
                 fetch_bond_redeem.clear()
                 fetch_bond_all_list.clear()
 
-            spot_df = fetch_bond_spot()
-            comparison_df = fetch_bond_comparison()
-            redeem_df = fetch_bond_redeem()
-            detail_df = fetch_bond_all_list()
+            try:
+                spot_df = fetch_bond_spot()
+                comparison_df = fetch_bond_comparison()
+                redeem_df = fetch_bond_redeem()
+                detail_df = fetch_bond_all_list()
 
-            merged = merge_bond_data(spot_df, comparison_df, redeem_df, detail_df)
-            inactive = split_active_inactive(comparison_df, detail_df)
+                merged = merge_bond_data(spot_df, comparison_df, redeem_df, detail_df)
+                inactive = split_active_inactive(comparison_df, detail_df)
 
-            st.session_state["cb_data"] = merged
-            st.session_state["cb_inactive"] = inactive
-            st.session_state["cb_last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state["cb_data"] = merged
+                st.session_state["cb_inactive"] = inactive
+                st.session_state["cb_last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception as _load_err:
+                logging.exception("数据加载异常")
+                st.error("数据加载时发生意外错误，请检查网络连接后重试。")
 
-        if st.session_state["cb_data"].empty:
-            st.error("数据加载失败，请检查网络连接后重试。")
-        else:
+        if not st.session_state["cb_data"].empty:
             st.success(f"数据加载成功，共 {len(st.session_state['cb_data'])} 条正在交易的可转债。")
+        elif st.session_state["cb_last_update"]:
+            # Data was attempted but resulted in empty – give a helpful hint
+            st.error(
+                "数据加载失败：未能获取到可转债列表。\n"
+                "可能原因：行情数据源暂时不可用或网络连接异常。\n"
+                "请稍后点击「加载 / 刷新数据」重试。"
+            )
 
     df: pd.DataFrame = st.session_state["cb_data"].copy()
 
