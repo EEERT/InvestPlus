@@ -203,7 +203,22 @@ def fetch_bond_comparison() -> pd.DataFrame:
     try:
         df = ak.bond_cov_comparison()
         if df is not None and not df.empty:
-            return df.copy()
+            df = df.copy()
+            # AKShare's fetch_paginated_data calls pd.to_numeric on the code
+            # field (f3), so 转债代码 arrives as float (e.g. 110044.0).
+            # Convert to a clean 6-digit string so it matches codes from
+            # other data sources (RPT_BOND_CB_LIST returns plain strings).
+            for col in ("转债代码", "正股代码"):
+                if col in df.columns:
+                    df[col] = (
+                        df[col]
+                        .apply(
+                            lambda x: str(int(float(x))).zfill(6)
+                            if pd.notna(x) and str(x).strip() not in ("", "-", "--")
+                            else ""
+                        )
+                    )
+            return df
     except Exception:
         pass
 
