@@ -80,9 +80,49 @@ _EM_FIELD_MAP = {
     "CONVERT_START_DATE": "转股起始日",
 }
 
+_JSL_NUMERIC_COLS = [
+    "转债现价",
+    "转债涨跌",
+    "正股价",
+    "正股涨跌",
+    "正股PB",
+    "转股价",
+    "转股价值",
+    "转股溢价率",
+    "回售触发价",
+    "强赎触发价",
+    "转债占比",
+    "剩余年限",
+    "剩余规模",
+    "到期税前收益",
+]
+
 
 def _run_ak_with_timeout(func, *args, timeout: float = 15, **kwargs):
-    """Run an AKShare call with a hard timeout to avoid long hangs."""
+    """Run an AKShare call with a timeout guard.
+
+    Parameters
+    ----------
+    func : callable
+        AKShare callable to execute.
+    *args
+        Positional arguments passed to ``func``.
+    timeout : float
+        Maximum wait time in seconds.
+    **kwargs
+        Keyword arguments passed to ``func``.
+
+    Returns
+    -------
+    Any | None
+        The callable result on success, otherwise ``None``.
+
+    Notes
+    -----
+    Python threads cannot forcibly terminate a running blocking socket call.
+    On timeout we return immediately and release the executor; the worker may
+    finish in background shortly afterwards.
+    """
     executor = ThreadPoolExecutor(max_workers=1)
     future = executor.submit(func, *args, **kwargs)
     try:
@@ -91,7 +131,6 @@ def _run_ak_with_timeout(func, *args, timeout: float = 15, **kwargs):
         logger.warning(
             "%s timed out after %.1fs", getattr(func, "__name__", str(func)), timeout
         )
-        future.cancel()
         return None
     except Exception as exc:
         logger.warning("%s failed: %s", getattr(func, "__name__", str(func)), exc)
@@ -107,7 +146,7 @@ def _normalise_security_code(code: object) -> str:
         return ""
     s = re.sub(r"^(SH|SZ|BJ)", "", s)
     s = re.sub(r"\.0+$", "", s)
-    m = re.search(r"(\d{1,})", s)
+    m = re.search(r"(\d+)", s)
     if not m:
         return ""
     digits = m.group(1)
@@ -343,22 +382,7 @@ def fetch_bond_comparison() -> pd.DataFrame:
             for col in ("转债代码", "正股代码"):
                 if col in jsl_df.columns:
                     jsl_df[col] = jsl_df[col].apply(_normalise_security_code)
-            for col in [
-                "转债现价",
-                "转债涨跌",
-                "正股价",
-                "正股涨跌",
-                "正股PB",
-                "转股价",
-                "转股价值",
-                "转股溢价率",
-                "回售触发价",
-                "强赎触发价",
-                "转债占比",
-                "剩余年限",
-                "剩余规模",
-                "到期税前收益",
-            ]:
+            for col in _JSL_NUMERIC_COLS:
                 if col in jsl_df.columns:
                     jsl_df[col] = pd.to_numeric(jsl_df[col], errors="coerce")
             if "到期时间" in jsl_df.columns:
