@@ -274,10 +274,10 @@ else:
         df = df[df["到期税前收益"].isna() | (df["到期税前收益"] >= ytm_min)]
 
     if selected_ratings and "债券评级" in df.columns:
-        other_ratings = [r for r in selected_ratings if r == "其他"]
+        has_other = "其他" in selected_ratings
         main_ratings = [r for r in selected_ratings if r != "其他"]
         mask = df["债券评级"].isin(main_ratings) if main_ratings else pd.Series(False, index=df.index)
-        if other_ratings:
+        if has_other:
             mask = mask | (~df["债券评级"].isin(_KNOWN_RATINGS) & df["债券评级"].notna())
         df = df[mask]
 
@@ -349,6 +349,8 @@ else:
         column_config["剩余年限"] = st.column_config.NumberColumn("剩余年限 (年)", format="%.2f")
     if "剩余规模" in df.columns:
         column_config["剩余规模"] = st.column_config.NumberColumn("剩余规模 (亿)", format="%.2f")
+    if "到期时间" in df.columns:
+        column_config["到期时间"] = st.column_config.DatetimeColumn("到期时间", format="YYYY-MM-DD")
 
     # ── Styled DataFrame ──────────────────────────────────────────────────────
     try:

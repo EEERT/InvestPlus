@@ -368,7 +368,7 @@ def merge_bond_data(
         today_ts = pd.Timestamp(date.today())
         days_left = (result["到期时间"] - today_ts).dt.days
         result["剩余年限"] = (days_left / 365.25).clip(lower=0).where(
-            result["到期时间"].notna(), other=float("nan")
+            result["到期时间"].notna()
         ).round(4)
     elif "剩余年限" in result.columns:
         result["剩余年限"] = pd.to_numeric(result["剩余年限"], errors="coerce")
@@ -410,11 +410,6 @@ def merge_bond_data(
     ]
     available = [c for c in final_cols if c in result.columns]
     result = result[available].reset_index(drop=True)
-
-    # Format 到期时间 as date string for display
-    if "到期时间" in result.columns:
-        dt_col = pd.to_datetime(result["到期时间"], errors="coerce")
-        result["到期时间"] = dt_col.dt.strftime("%Y-%m-%d").where(dt_col.notna(), other=None)
 
     # Add sequential index
     result.insert(0, "序号", range(1, len(result) + 1))
