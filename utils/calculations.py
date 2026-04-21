@@ -135,6 +135,12 @@ def _normalise_bond_code(code: str) -> str:
 # to merge into the active-bond comparison result.
 _DETAIL_SUPPLEMENT_COLS = ["债券评级", "到期时间", "剩余规模", "正股PB", "转债占比", "发行规模"]
 
+# Keywords in 强赎状态 that indicate the issuer has announced they will NOT
+# exercise the forced-redemption right.  Per CB regulations the issuer cannot
+# exercise the right again during the exchange's restricted period after such
+# an announcement, so the trigger-day counter should be reset to 0.
+_REDEEM_WAIVER_PATTERN = r"不赎|放弃|waiv"
+
 
 # ---------------------------------------------------------------------------
 # Data merge & enrichment
@@ -228,6 +234,34 @@ def merge_bond_data(
                 det_merge = det[["转债代码"] + available_extras].drop_duplicates("转债代码")
                 result = result.merge(det_merge, on="转债代码", how="left")
 
+            # Override bond name with authoritative data from RPT_BOND_CB_LIST.
+            # bond_cov_comparison() (push2 API) may return stock names in the
+            # 转债名称 field; the datacenter API is more reliable.
+            if "转债名称" in det.columns:
+                _det_names = (
+                    det[["转债代码", "转债名称"]]
+                    .drop_duplicates("转债代码")
+                    .rename(columns={"转债名称": "_det_转债名称"})
+                )
+                result = result.merge(_det_names, on="转债代码", how="left")
+                _valid_name = (
+                    result["_det_转债名称"].notna()
+                    & (result["_det_转债名称"].astype(str).str.strip() != "")
+                )
+                if "转债名称" not in result.columns:
+                    result["转债名称"] = None
+                result["转债名称"] = result["_det_转债名称"].where(
+                    _valid_name, result["转债名称"]
+                )
+                result = result.drop(columns=["_det_转债名称"])
+
+    # ── 2a. Filter to currently trading bonds (positive remaining balance) ──
+    # Bonds with 剩余规模 = 0 have been fully redeemed/matured; remove them.
+    # Bonds where 剩余规模 is NaN (data unavailable) are retained to avoid
+    # false negatives when the datacenter API doesn't return balance data.
+    if "剩余规模" in result.columns:
+        result = result[result["剩余规模"].isna() | (result["剩余规模"] > 0)]
+
     # ── 3. Merge spot data (real-time price supplement) ───────────────────
     if spot_df is not None and not spot_df.empty:
         spot_norm = spot_df.copy()
@@ -292,17 +326,22 @@ def merge_bond_data(
             redeem_norm,
             ["强赎天计数", "已满足天数", "满足天数", "强赎天数", "redeem_days", "days"],
         )
+        status_col_r = _find_col(redeem_norm, ["强赎状态", "redeem_status", "状态"])
         if code_col_r and days_col_r:
-            redeem_norm = redeem_norm[[code_col_r, days_col_r]].copy()
+            cols_to_keep = [code_col_r, days_col_r]
+            if status_col_r and status_col_r not in cols_to_keep:
+                cols_to_keep.append(status_col_r)
+            redeem_norm = redeem_norm[cols_to_keep].copy()
             redeem_norm[days_col_r] = pd.to_numeric(
                 redeem_norm[days_col_r]
                 .astype(str)
                 .str.extract(r"(\d+)", expand=False),
                 errors="coerce",
             )
-            redeem_norm = redeem_norm.rename(
-                columns={code_col_r: "转债代码_r", days_col_r: "强赎触发天数_r"}
-            )
+            rename_r: dict = {code_col_r: "转债代码_r", days_col_r: "强赎触发天数_r"}
+            if status_col_r:
+                rename_r[status_col_r] = "强赎状态_r"
+            redeem_norm = redeem_norm.rename(columns=rename_r)
             redeem_norm["转债代码_r"] = (
                 redeem_norm["转债代码_r"].astype(str).apply(_normalise_bond_code)
             )
@@ -318,6 +357,25 @@ def merge_bond_data(
                     result["强赎触发天数_r"], errors="coerce"
                 )
                 result = result.drop(columns=["强赎触发天数_r"], errors="ignore")
+
+                # Merge redemption status so users can see whether the issuer
+                # has announced they will not exercise the redemption right.
+                if "强赎状态_r" in result.columns:
+                    result["强赎状态"] = result["强赎状态_r"].where(
+                        result["强赎状态_r"].notna(), None
+                    )
+                    result = result.drop(columns=["强赎状态_r"], errors="ignore")
+
+                # Per CB regulations: once an issuer announces they will NOT
+                # exercise the redemption right, they cannot do so again in the
+                # exchange's restricted period.  Reset the trigger day count to
+                # 0 for bonds whose status indicates a waiver so that alert
+                # thresholds are not incorrectly triggered.
+                if "强赎状态" in result.columns:
+                    _waived = result["强赎状态"].astype(str).str.contains(
+                        _REDEEM_WAIVER_PATTERN, case=False, na=False
+                    )
+                    result.loc[_waived, "强赎触发天数"] = 0
 
     # ── 5. Compute derived fields ──────────────────────────────────────────
     # Numeric conversions
@@ -396,7 +454,7 @@ def merge_bond_data(
     for col in [
         "转债名称", "正股名称", "正股价", "正股涨跌", "正股PB",
         "转股价", "债券评级", "回售触发价", "强赎触发价",
-        "转债占比", "到期时间", "剩余年限",
+        "转债占比", "到期时间", "剩余年限", "强赎状态",
     ]:
         if col not in result.columns:
             result[col] = None
@@ -412,7 +470,7 @@ def merge_bond_data(
         "转债代码", "转债名称", "现价", "涨跌幅", "正股名称",
         "正股价", "正股涨跌", "正股PB", "转股价", "转股价值",
         "转股溢价率", "债券评级", "回售触发价", "回售触发天数",
-        "强赎触发价", "强赎触发天数", "转债占比", "到期时间",
+        "强赎触发价", "强赎触发天数", "强赎状态", "转债占比", "到期时间",
         "剩余年限", "剩余规模",
     ]
     available = [c for c in final_cols if c in result.columns]
