@@ -495,6 +495,8 @@ else:
         column_config["回售触发天数"] = st.column_config.NumberColumn("回售触发天数", format="%.0f 天")
     if "强赎触发天数" in df.columns:
         column_config["强赎触发天数"] = st.column_config.NumberColumn("强赎触发天数", format="%.0f 天")
+    if "强赎状态" in df.columns:
+        column_config["强赎状态"] = st.column_config.TextColumn("强赎状态")
     if "剩余年限" in df.columns:
         column_config["剩余年限"] = st.column_config.NumberColumn("剩余年限 (年)", format="%.2f")
     if "剩余规模" in df.columns:
@@ -522,7 +524,9 @@ else:
     # ── Legend ────────────────────────────────────────────────────────────────
     st.caption(
         "🟡 黄色：强赎触发天数在10~15天之间（即将触发强赎）　"
-        "🔴 红色：回售触发天数 > 25天（存在回售风险）"
+        "🔴 红色：回售触发天数 > 25天（存在回售风险）　"
+        "强赎状态列显示集思录强赎进度（进入计数/已公告强赎等），"
+        "发行人宣布不赎回时天数重置为0"
     )
 
     # ── Export ────────────────────────────────────────────────────────────────
