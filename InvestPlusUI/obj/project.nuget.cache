@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "CgvIsjOsoIw=",
+  "success": true,
+  "projectFilePath": "/home/runner/work/InvestPlus/InvestPlus/InvestPlusUI/InvestPlusUI.csproj",
+  "expectedPackageFiles": [
+    "/home/runner/.nuget/packages/csvhelper/33.0.1/csvhelper.33.0.1.nupkg.sha512",
+    "/home/runner/.nuget/packages/microsoft.windowsdesktop.app.ref/8.0.25/microsoft.windowsdesktop.app.ref.8.0.25.nupkg.sha512"
+  ],
+  "logs": []
+}

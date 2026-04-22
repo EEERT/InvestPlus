@@ -15,8 +15,10 @@ Data sources:
 """
 
 import logging
+import random
 import re
 import time
+from typing import Optional
 
 import akshare as ak
 import pandas as pd
@@ -38,6 +40,254 @@ _HTTP_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
+
+# ── Anti-scraping: rotating User-Agent pool ───────────────────────────────────
+_ROTATING_USER_AGENTS = [
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0.0.0 Safari/537.36 Edg/121.0.2277.98"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) "
+        "Gecko/20100101 Firefox/121.0"
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+]
+
+# ── Anti-scraping: module-level persistent session ───────────────────────────
+# A single long-lived session preserves the cookies obtained by visiting the
+# Eastmoney HTML page, which prevents the push2 API from detecting that
+# consecutive requests come from an automated tool rather than a browser.
+_em_push2_session: Optional[requests.Session] = None
+_em_session_created_at: float = 0.0
+_em_last_api_call: float = 0.0
+_EM_SESSION_TTL: float = 600.0   # Recreate session after 10 minutes
+_EM_MIN_INTERVAL: float = 3.5    # Minimum seconds between consecutive push2 calls
+
+
+def _get_push2_session(force_new: bool = False) -> requests.Session:
+    """Return a persistent requests.Session pre-warmed with Eastmoney cookies.
+
+    On first call (or after TTL expiry) the function visits the Eastmoney
+    bond-comparison HTML page so the session accumulates the same cookies a
+    real browser would have before it hits the JSON API endpoint.  This
+    prevents the anti-scraping layer from blocking the first API call.
+    """
+    global _em_push2_session, _em_session_created_at
+
+    now = time.time()
+    if (
+        force_new
+        or _em_push2_session is None
+        or now - _em_session_created_at > _EM_SESSION_TTL
+    ):
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=2, max_retries=0)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        ua = random.choice(_ROTATING_USER_AGENTS)
+        session.headers.update(
+            {
+                "User-Agent": ua,
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;"
+                    "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+                ),
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+
+        # Visit the HTML comparison page to establish browser-like cookies.
+        try:
+            resp = session.get(
+                "https://quote.eastmoney.com/center/fullscreenlist.html",
+                timeout=15,
+                allow_redirects=True,
+            )
+            logger.info(
+                "_get_push2_session: warmed session, status=%d, cookies=%s",
+                resp.status_code,
+                list(session.cookies.keys()),
+            )
+            # Brief pause – mimics the time a human takes to read the page.
+            time.sleep(random.uniform(1.5, 3.0))
+        except Exception as exc:
+            logger.warning("_get_push2_session: warm-up request failed: %s", exc)
+
+        _em_push2_session = session
+        _em_session_created_at = time.time()
+
+    return _em_push2_session
+
+
+def _fetch_bond_cov_comparison_human() -> pd.DataFrame:
+    """Fetch the Eastmoney push2 convertible-bond comparison list while
+    simulating human-like browsing to bypass anti-scraping measures.
+
+    Eastmoney's push2 API blocks repeated requests that arrive without valid
+    browser cookies or with too-short intervals between calls.  This function
+    works around the restriction by:
+
+    1. Keeping a **persistent** :class:`requests.Session` that retains the
+       cookies obtained from the HTML page visit (see :func:`_get_push2_session`).
+    2. Enforcing a minimum gap (``_EM_MIN_INTERVAL``) between consecutive API
+       calls and adding random jitter to the wait time.
+    3. Rotating the ``User-Agent`` header to reduce fingerprinting.
+    4. Setting ``Referer`` and ``Sec-Fetch-*`` headers that match what a real
+       browser sends when navigating from the HTML page to the JSON endpoint.
+    """
+    global _em_last_api_call
+
+    # Enforce minimum interval between calls ─────────────────────────────────
+    now = time.time()
+    elapsed = now - _em_last_api_call
+    if elapsed < _EM_MIN_INTERVAL:
+        wait = _EM_MIN_INTERVAL - elapsed + random.uniform(0.5, 2.0)
+        logger.info("_fetch_bond_cov_comparison_human: rate-limit wait %.1f s", wait)
+        time.sleep(wait)
+
+    session = _get_push2_session()
+
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    api_headers = {
+        "Referer": "https://quote.eastmoney.com/center/fullscreenlist.html",
+        "Accept": "application/json, text/plain, */*",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+    # f-field → human-readable column name (mirrors AKShare's bond_cov_comparison)
+    field_map = {
+        "f1":   "序号",
+        "f2":   "转债最新价",
+        "f3":   "转债涨跌幅",
+        "f12":  "转债代码",
+        "f14":  "转债名称",
+        "f227": "上市日期",
+        "f229": "纯债价值",
+        "f231": "正股最新价",
+        "f232": "正股涨跌幅",
+        "f234": "正股代码",
+        "f236": "正股名称",
+        "f237": "转股价",
+        "f238": "转股价值",
+        "f239": "转股溢价率",
+        "f240": "纯债溢价率",
+        "f241": "回售触发价",
+        "f242": "强赎触发价",
+        "f26":  "到期赎回价",
+        "f243": "开始转股日",
+    }
+    fields_str = (
+        "f1,f152,f2,f3,f12,f13,f14,f227,f228,f229,f230,f231,f232,f233,f234,"
+        "f235,f236,f237,f238,f239,f240,f241,f242,f26,f243"
+    )
+
+    all_rows: list = []
+    page = 1
+
+    while True:
+        params = {
+            "pn": str(page),
+            "pz": "100",
+            "po": "1",
+            "np": "1",
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": "2",
+            "invt": "2",
+            "fid": "f243",
+            "fs": "b:MK0354",
+            "fields": fields_str,
+            "_": str(int(time.time() * 1000)),
+        }
+        try:
+            _em_last_api_call = time.time()
+            resp = session.get(url, params=params, headers=api_headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            diff = (data.get("data") or {}).get("diff", [])
+            if not diff:
+                logger.warning(
+                    "_fetch_bond_cov_comparison_human: page %d returned no diff",
+                    page,
+                )
+                break
+
+            all_rows.extend(diff)
+            total = (data.get("data") or {}).get("total", 0)
+            if len(all_rows) >= total:
+                break
+
+            page += 1
+            # Human-like delay between pages
+            time.sleep(random.uniform(1.0, 2.5))
+
+        except Exception as exc:
+            logger.warning(
+                "_fetch_bond_cov_comparison_human: page %d failed: %s – "
+                "invalidating session",
+                page,
+                exc,
+            )
+            # Drop the session so the next call creates a fresh one with new cookies.
+            _em_push2_session = None
+            break
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    records = [
+        {col_name: row.get(field) for field, col_name in field_map.items()}
+        for row in all_rows
+    ]
+    df = pd.DataFrame(records)
+
+    # Numeric conversions ──────────────────────────────────────────────────────
+    for col in [
+        "转债最新价", "转债涨跌幅", "正股最新价", "正股涨跌幅",
+        "转股价", "转股价值", "转股溢价率", "纯债溢价率",
+        "回售触发价", "强赎触发价", "纯债价值",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Code normalisation ───────────────────────────────────────────────────────
+    for col in ("转债代码", "正股代码"):
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: str(int(float(x))).zfill(6)
+                if pd.notna(x) and str(x).strip() not in ("", "-", "--")
+                else ""
+            )
+
+    logger.info(
+        "_fetch_bond_cov_comparison_human: fetched %d rows across %d page(s)",
+        len(df),
+        page,
+    )
+    return df
 
 # ── Eastmoney RPT_BOND_CB_LIST direct API ─────────────────────────────────────
 
@@ -267,15 +517,28 @@ def fetch_bond_comparison() -> pd.DataFrame:
     """
     Fetch CURRENTLY TRADING convertible bonds from Eastmoney comparison table.
 
-    Primary source: bond_cov_comparison() (Eastmoney push2 real-time API).
-    Fallback source: RPT_BOND_CB_LIST datacenter API filtered to active bonds,
-    used when the primary source is unreachable.
+    Sources tried in order:
+    1. Human-simulation push2 fetch (:func:`_fetch_bond_cov_comparison_human`)
+       – persistent session + random delays bypass anti-scraping.
+    2. AKShare ``bond_cov_comparison()`` – standard fallback if the above fails.
+    3. RPT_BOND_CB_LIST datacenter API – stable fallback when push2 is down.
 
-    Returns DataFrame with columns from bond_cov_comparison() when primary
-    source is available, or standardised columns from the datacenter API when
-    falling back.
+    Returns DataFrame with standardised column names.
     """
-    # ── Primary source: AKShare bond_cov_comparison ───────────────────────
+    # ── Primary source: human-simulation push2 fetch ─────────────────────
+    try:
+        df = _fetch_bond_cov_comparison_human()
+        if df is not None and not df.empty:
+            logger.info(
+                "fetch_bond_comparison: human-sim source returned %d rows", len(df)
+            )
+            return df
+    except Exception as exc:
+        logger.warning(
+            "fetch_bond_comparison: human-sim source failed: %s", exc
+        )
+
+    # ── Secondary source: AKShare bond_cov_comparison ────────────────────
     try:
         df = ak.bond_cov_comparison()
         if df is not None and not df.empty:
@@ -295,11 +558,11 @@ def fetch_bond_comparison() -> pd.DataFrame:
                         )
                     )
             logger.info(
-                "fetch_bond_comparison: primary source returned %d rows", len(df)
+                "fetch_bond_comparison: AKShare source returned %d rows", len(df)
             )
             return df
     except Exception as exc:
-        logger.warning("fetch_bond_comparison: primary source failed: %s", exc)
+        logger.warning("fetch_bond_comparison: AKShare source failed: %s", exc)
 
     # ── Fallback: Eastmoney datacenter RPT_BOND_CB_LIST (active bonds only) ─
     # Uses the same stable endpoint as fetch_bond_all_list(), filtered to
