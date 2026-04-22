@@ -21,6 +21,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+try:
+    import numpy as _np  # optional – only used for type narrowing in _safe()
+except ImportError:  # pragma: no cover
+    _np = None  # type: ignore[assignment]
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -54,15 +59,12 @@ def _safe(val: Any) -> Any:
     if isinstance(val, pd.Timestamp):
         return val.strftime("%Y-%m-%d") if not pd.isna(val) else None
     # numpy integer / float subtypes
-    try:
-        import numpy as np  # noqa: PLC0415
-        if isinstance(val, (np.integer,)):
+    if _np is not None:
+        if isinstance(val, _np.integer):
             return int(val)
-        if isinstance(val, (np.floating,)):
+        if isinstance(val, _np.floating):
             v = float(val)
             return None if (math.isnan(v) or math.isinf(v)) else v
-    except ImportError:
-        pass
     return val
 
 

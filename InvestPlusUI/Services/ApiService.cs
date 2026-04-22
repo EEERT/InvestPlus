@@ -47,8 +47,14 @@ public class ApiService : IDisposable
             var response = await _client.GetAsync("/api/health", ct);
             return response.IsSuccessStatusCode;
         }
-        catch
+        catch (HttpRequestException ex)
         {
+            System.Diagnostics.Debug.WriteLine($"Health check HttpRequestException: {ex.Message}");
+            return false;
+        }
+        catch (TaskCanceledException ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Health check timed out: {ex.Message}");
             return false;
         }
     }

@@ -40,9 +40,12 @@ public partial class MainForm : Form
     private List<BondInfo> _allBonds = new();
     private ApiService? _api;
 
-    // ── 颜色预警 ─────────────────────────────────────────────────────────────
+    // ── 颜色预警阈值 ─────────────────────────────────────────────────────────
     private static readonly Color ColYellow = Color.FromArgb(255, 243, 205);   // 接近强赎
     private static readonly Color ColRed    = Color.FromArgb(248, 215, 218);   // 回售风险
+    private const int RedeemWarningMin = 10;   // 强赎预警下限（天）
+    private const int RedeemWarningMax = 15;   // 强赎预警上限（天）
+    private const int PutWarningThreshold = 25; // 回售风险阈值（天）
 
     public MainForm()
     {
@@ -346,9 +349,9 @@ public partial class MainForm : Form
         if (row.DataBoundItem is not BondInfo bond) return;
 
         Color bg = _grid.DefaultCellStyle.BackColor;
-        if (bond.RedeemTriggerDays is > 10 and < 15)
+        if (bond.RedeemTriggerDays is > RedeemWarningMin and < RedeemWarningMax)
             bg = ColYellow;
-        else if (bond.PutTriggerDays is > 25)
+        else if (bond.PutTriggerDays is > PutWarningThreshold)
             bg = ColRed;
 
         foreach (DataGridViewCell cell in row.Cells)

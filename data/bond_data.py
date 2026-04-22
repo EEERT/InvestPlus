@@ -252,6 +252,7 @@ def _fetch_bond_cov_comparison_human() -> pd.DataFrame:
                 exc,
             )
             # Drop the session so the next call creates a fresh one with new cookies.
+            global _em_push2_session  # noqa: PLW0603
             _em_push2_session = None
             break
 

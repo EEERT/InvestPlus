@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.env
+.venv
+venv/
+env/
+*.log
+
+# Streamlit
+.streamlit/
+
+# .NET / C#
+InvestPlusUI/bin/
+InvestPlusUI/obj/
+*.user
+*.suo
+.vs/
