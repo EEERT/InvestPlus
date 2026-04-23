@@ -262,12 +262,16 @@ def merge_bond_data(
     if "剩余规模" in result.columns:
         result = result[result["剩余规模"].isna() | (result["剩余规模"] > 0)]
 
-    # ── 3. Merge spot data (real-time price supplement) ───────────────────
+    # ── 3. Merge spot data (real-time price supplement + name fallback) ───
     if spot_df is not None and not spot_df.empty:
         spot_norm = spot_df.copy()
         code_col = _find_col(spot_norm, ["代码", "bond_id", "code"])
         price_col = _find_col(spot_norm, ["现价", "最新价", "close", "price"])
         chg_col = _find_col(spot_norm, ["涨跌幅", "change_pct", "pct_chg"])
+        # Sina spot data carries the correct bond short-name in "名称".
+        # Capture it so we can use it as a fallback when the detail_df
+        # name lookup yields nothing (e.g. the bond was just listed).
+        name_col = _find_col(spot_norm, ["名称", "bond_name", "name"])
 
         spot_rename = {}
         if code_col:
@@ -276,6 +280,8 @@ def merge_bond_data(
             spot_rename[price_col] = "现价_spot"
         if chg_col:
             spot_rename[chg_col] = "涨跌幅_spot"
+        if name_col:
+            spot_rename[name_col] = "名称_spot"
         spot_norm = spot_norm.rename(columns=spot_rename)
 
         if "转债代码_spot" in spot_norm.columns:
@@ -283,7 +289,8 @@ def merge_bond_data(
                 spot_norm["转债代码_spot"].astype(str).apply(_normalise_bond_code)
             )
             spot_merge = spot_norm[
-                [c for c in ["转债代码_spot", "现价_spot", "涨跌幅_spot"] if c in spot_norm.columns]
+                [c for c in ["转债代码_spot", "现价_spot", "涨跌幅_spot", "名称_spot"]
+                 if c in spot_norm.columns]
             ].copy()
             if "转债代码" in result.columns:
                 result = result.merge(
@@ -293,6 +300,24 @@ def merge_bond_data(
                     how="left",
                 )
                 result = result.drop(columns=["转债代码_spot"], errors="ignore")
+
+    # Resolve bond name: priority → detail_df (already applied in step 2) →
+    # Sina spot name → original comparison name.
+    # bond_cov_comparison() (push2 API) sometimes returns the underlying
+    # stock's name in the 转债名称 field.  The detail_df override in step 2
+    # fixes most cases; the Sina spot fallback covers any remaining gaps.
+    if "名称_spot" in result.columns:
+        _missing_name = (
+            result["转债名称"].isna()
+            | (result["转债名称"].astype(str).str.strip() == "")
+        )
+        _spot_valid = result["名称_spot"].notna() & (
+            result["名称_spot"].astype(str).str.strip() != ""
+        )
+        result.loc[_missing_name & _spot_valid, "转债名称"] = result.loc[
+            _missing_name & _spot_valid, "名称_spot"
+        ]
+        result = result.drop(columns=["名称_spot"], errors="ignore")
 
     # Resolve price: prefer spot, then comparison
     if "现价_spot" in result.columns:
