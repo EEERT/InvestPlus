@@ -14,20 +14,48 @@ Data sources:
 - bond_zh_hs_cov_spot()   : Sina real-time spot data (supplementary price feed).
 """
 
+import functools
 import logging
 import random
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 import akshare as ak
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
-import streamlit as st
-from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+# ── Lightweight TTL cache (no external dependencies) ─────────────────────────
+
+def _ttl_cache(ttl: float):
+    """Decorator that caches the return value for *ttl* seconds.
+
+    Unlike :func:`functools.lru_cache` this cache expires entries based on
+    wall-clock time, which is useful for data-fetching functions that should
+    return fresh results after a configurable interval.
+    """
+    def decorator(fn):
+        _store: dict = {}
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            entry = _store.get(key)
+            if entry is not None:
+                result, ts = entry
+                if time.monotonic() - ts < ttl:
+                    return result
+            result = fn(*args, **kwargs)
+            _store[key] = (result, time.monotonic())
+            return result
+
+        return wrapper
+    return decorator
 
 # ── Common HTTP headers for direct API requests ──────────────────────────────
 _HTTP_HEADERS = {
@@ -396,7 +424,7 @@ def _fetch_em_cb_list_page(
     return {}
 
 
-@st.cache_data(ttl=300)
+@_ttl_cache(ttl=300)
 def fetch_bond_all_list() -> pd.DataFrame:
     """
     Fetch ALL convertible bonds (active + historical) from Eastmoney RPT_BOND_CB_LIST.
@@ -467,7 +495,7 @@ def fetch_bond_all_list() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=120)
+@_ttl_cache(ttl=120)
 def fetch_bond_spot() -> pd.DataFrame:
     """
     Fetch convertible bond spot market data from Sina Finance.
@@ -513,7 +541,7 @@ def fetch_bond_spot() -> pd.DataFrame:
         return pd.DataFrame(columns=["代码", "名称", "现价", "涨跌幅"])
 
 
-@st.cache_data(ttl=120)
+@_ttl_cache(ttl=120)
 def fetch_bond_comparison() -> pd.DataFrame:
     """
     Fetch CURRENTLY TRADING convertible bonds from Eastmoney comparison table.
@@ -636,7 +664,7 @@ def fetch_bond_comparison() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-@st.cache_data(ttl=120)
+@_ttl_cache(ttl=120)
 def fetch_bond_redeem() -> pd.DataFrame:
     """
     Fetch convertible bond forced-redemption progress data from JiSiLu.
@@ -655,7 +683,7 @@ def fetch_bond_redeem() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=120)
+@_ttl_cache(ttl=120)
 def fetch_stock_hist(code: str, days: int = 60) -> pd.DataFrame:
     """
     Fetch recent N trading days of daily OHLCV data for a given A-share stock.
