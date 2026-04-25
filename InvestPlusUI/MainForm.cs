@@ -6,10 +6,10 @@ using InvestPlusUI.Services;
 namespace InvestPlusUI;
 
 /// <summary>
-/// 主窗体：可转债行情监测界面。
+/// 主窗体：可转债行情监测界面（纯 C# / AKTools 版本）。
 ///
 /// 布局（从上至下）：
-///   工具栏   ─ 「启动后端」按钮、服务器地址输入框、「加载/刷新数据」按钮、「导出 CSV」按钮
+///   工具栏   ─ AKTools 地址输入框、「加载/刷新数据」按钮、「导出 CSV」按钮
 ///   筛选区   ─ 价格区间、转股溢价率区间、剩余年限区间、剩余规模上限
 ///   数据表格 ─ DataGridView，支持列排序、行色彩预警
 ///   状态栏   ─ 符合条件数量、最后更新时间
@@ -18,9 +18,8 @@ public partial class MainForm : Form
 {
     // ── 控件 ─────────────────────────────────────────────────────────────────
     private readonly TextBox _txtServer;
-    private readonly Button _btnStartBackend;
-    private readonly Button _btnLoad;
-    private readonly Button _btnExport;
+    private readonly Button  _btnLoad;
+    private readonly Button  _btnExport;
 
     private readonly NumericUpDown _numPriceMin;
     private readonly NumericUpDown _numPriceMax;
@@ -29,135 +28,120 @@ public partial class MainForm : Form
     private readonly NumericUpDown _numYearsMin;
     private readonly NumericUpDown _numYearsMax;
     private readonly NumericUpDown _numScaleMax;
-    private readonly Button _btnReset;
+    private readonly Button        _btnReset;
 
-    private readonly DataGridView _grid;
-    private readonly BindingList<BondInfo> _bindingList = new();
-    private readonly StatusStrip _statusStrip;
-    private readonly ToolStripStatusLabel _lblStatus;
-    private readonly ToolStripStatusLabel _lblUpdateTime;
+    private readonly DataGridView              _grid;
+    private readonly BindingList<BondInfo>     _bindingList = new();
+    private readonly StatusStrip               _statusStrip;
+    private readonly ToolStripStatusLabel      _lblStatus;
+    private readonly ToolStripStatusLabel      _lblUpdateTime;
 
     // ── 数据 ─────────────────────────────────────────────────────────────────
-    private List<BondInfo> _allBonds = new();
-    private ApiService? _api;
-    private readonly BackendService _backend = new();
+    private List<BondInfo>     _allBonds = new();
+    private CancellationTokenSource? _loadCts;
 
     // ── 颜色预警阈值 ─────────────────────────────────────────────────────────
-    private static readonly Color ColYellow  = Color.FromArgb(255, 243, 205);   // 接近强赎
-    private static readonly Color ColRed     = Color.FromArgb(248, 215, 218);   // 回售风险
-    private static readonly Color ColRunning = Color.FromArgb(108, 117, 125);   // 后端运行中
-    private const int RedeemWarningMin = 10;   // 强赎预警下限（天）
-    private const int RedeemWarningMax = 15;   // 强赎预警上限（天）
-    private const int PutWarningThreshold = 25; // 回售风险阈值（天）
-    private const int BackendStartupTimeoutSeconds = 30; // 后端启动超时（秒）
+    private static readonly Color ColYellow = Color.FromArgb(255, 243, 205);  // 接近强赎
+    private static readonly Color ColRed    = Color.FromArgb(248, 215, 218);  // 回售风险
+    private const int RedeemWarningMin      = 10;   // 强赎预警下限（天）
+    private const int RedeemWarningMax      = 15;   // 强赎预警上限（天）
+    private const int PutWarningThreshold   = 25;   // 回售风险阈值（天）
 
     public MainForm()
     {
-        Text = "InvestPlus 可转债监测助手";
-        Size = new Size(1600, 900);
-        MinimumSize = new Size(1100, 600);
-        StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Microsoft YaHei UI", 9f);
+        Text            = "InvestPlus 可转债监测助手";
+        Size            = new Size(1600, 900);
+        MinimumSize     = new Size(1100, 600);
+        StartPosition   = FormStartPosition.CenterScreen;
+        Font            = new Font("Microsoft YaHei UI", 9f);
 
         // ── 工具栏 ─────────────────────────────────────────────────────────
         var toolbar = new Panel
         {
-            Dock = DockStyle.Top,
-            Height = 44,
-            Padding = new Padding(6, 6, 6, 0),
+            Dock      = DockStyle.Top,
+            Height    = 44,
+            Padding   = new Padding(6, 6, 6, 0),
             BackColor = Color.FromArgb(240, 240, 240),
         };
 
         var lblServer = new Label
         {
-            Text = "后端地址：",
-            AutoSize = true,
+            Text      = "AKTools 地址：",
+            AutoSize  = true,
             TextAlign = ContentAlignment.MiddleLeft,
-            Margin = new Padding(0, 4, 4, 0),
+            Margin    = new Padding(0, 4, 4, 0),
         };
         _txtServer = new TextBox
         {
-            Text = "http://localhost:8000",
-            Width = 220,
+            Text   = "http://localhost:8080",
+            Width  = 220,
             Margin = new Padding(0, 4, 8, 0),
         };
-        _btnStartBackend = new Button
-        {
-            Text = "🔄 重启后端",
-            Width = 110,
-            Height = 28,
-            Margin = new Padding(0, 2, 8, 0),
-            UseVisualStyleBackColor = true,
-            BackColor = Color.FromArgb(40, 167, 69),
-            ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat,
-        };
-        _btnStartBackend.FlatAppearance.BorderSize = 0;
         _btnLoad = new Button
         {
-            Text = "🔄 加载 / 刷新数据",
-            Width = 140,
-            Height = 28,
-            Margin = new Padding(0, 2, 8, 0),
+            Text                   = "🔄 加载 / 刷新数据",
+            Width                  = 140,
+            Height                 = 28,
+            Margin                 = new Padding(0, 2, 8, 0),
             UseVisualStyleBackColor = true,
         };
         _btnExport = new Button
         {
-            Text = "📥 导出 CSV",
-            Width = 110,
-            Height = 28,
-            Margin = new Padding(0, 2, 0, 0),
+            Text                   = "📥 导出 CSV",
+            Width                  = 110,
+            Height                 = 28,
+            Margin                 = new Padding(0, 2, 0, 0),
             UseVisualStyleBackColor = true,
-            Enabled = false,
+            Enabled                = false,
         };
 
         var flow = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock          = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            AutoSize = true,
+            WrapContents  = false,
+            AutoSize      = true,
         };
-        flow.Controls.AddRange(new Control[] { lblServer, _txtServer, _btnStartBackend, _btnLoad, _btnExport });
+        flow.Controls.AddRange(new Control[] { lblServer, _txtServer, _btnLoad, _btnExport });
         toolbar.Controls.Add(flow);
 
         // ── 筛选区 ─────────────────────────────────────────────────────────
         var filterPanel = new Panel
         {
-            Dock = DockStyle.Top,
-            Height = 52,
-            Padding = new Padding(6, 4, 6, 2),
+            Dock      = DockStyle.Top,
+            Height    = 52,
+            Padding   = new Padding(6, 4, 6, 2),
             BackColor = Color.FromArgb(250, 250, 250),
         };
 
-        (_numPriceMin, _numPriceMax)     = MakeRangePair(0m, 10000m, 80m, 200m, "元");
-        (_numPremiumMin, _numPremiumMax) = MakeRangePair(-100m, 2000m, -50m, 100m, "%");
-        (_numYearsMin, _numYearsMax)     = MakeRangePair(0m, 30m, 0m, 8m, "年", dec: 2);
+        (_numPriceMin,   _numPriceMax)   = MakeRangePair(0m,    10000m, 80m,  200m, "元");
+        (_numPremiumMin, _numPremiumMax) = MakeRangePair(-100m,  2000m, -50m, 100m, "%");
+        (_numYearsMin,   _numYearsMax)   = MakeRangePair(0m,      30m,  0m,    8m,  "年", dec: 2);
         _numScaleMax = new NumericUpDown
         {
             Minimum = 0, Maximum = 5000, Value = 500, DecimalPlaces = 1, Increment = 0.5m,
-            Width = 75,
+            Width   = 75,
         };
         _btnReset = new Button
         {
-            Text = "🔃 重置",
-            Width = 70,
-            Height = 28,
+            Text                   = "🔃 重置",
+            Width                  = 70,
+            Height                 = 28,
             UseVisualStyleBackColor = true,
         };
 
         var filterFlow = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock          = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
+            WrapContents  = false,
         };
         filterFlow.Controls.AddRange(new Control[]
         {
-            MakeLabel("价格（元）"),     _numPriceMin,   MakeLabel("~"), _numPriceMax,
-            MakeLabel("  溢价率（%）"), _numPremiumMin, MakeLabel("~"), _numPremiumMax,
-            MakeLabel("  剩余年限（年）"), _numYearsMin, MakeLabel("~"), _numYearsMax,
-            MakeLabel("  剩余规模 ≤"),  _numScaleMax,   MakeLabel("亿"),
+            MakeLabel("价格（元）"),       _numPriceMin,   MakeLabel("~"), _numPriceMax,
+            MakeLabel("  溢价率（%）"),    _numPremiumMin, MakeLabel("~"), _numPremiumMax,
+            MakeLabel("  剩余年限（年）"), _numYearsMin,   MakeLabel("~"), _numYearsMax,
+            MakeLabel("  剩余规模 ≤"),     _numScaleMax,   MakeLabel("亿"),
             _btnReset,
         });
         filterPanel.Controls.Add(filterFlow);
@@ -165,37 +149,38 @@ public partial class MainForm : Form
         // ── DataGridView ───────────────────────────────────────────────────
         _grid = new DataGridView
         {
-            Dock = DockStyle.Fill,
-            ReadOnly = true,
-            AllowUserToAddRows = false,
-            AllowUserToDeleteRows = false,
-            AllowUserToResizeRows = false,
-            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
-            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-            RowHeadersVisible = false,
-            BackgroundColor = Color.White,
-            BorderStyle = BorderStyle.None,
+            Dock                         = DockStyle.Fill,
+            ReadOnly                     = true,
+            AllowUserToAddRows           = false,
+            AllowUserToDeleteRows        = false,
+            AllowUserToResizeRows        = false,
+            AutoSizeColumnsMode          = DataGridViewAutoSizeColumnsMode.None,
+            SelectionMode                = DataGridViewSelectionMode.FullRowSelect,
+            RowHeadersVisible            = false,
+            BackgroundColor              = Color.White,
+            BorderStyle                  = BorderStyle.None,
             AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
             {
                 BackColor = Color.FromArgb(248, 248, 255),
             },
             ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
             {
-                BackColor = Color.FromArgb(52, 73, 94),
-                ForeColor = Color.White,
-                Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold),
-                Alignment = DataGridViewContentAlignment.MiddleCenter,
+                BackColor  = Color.FromArgb(52, 73, 94),
+                ForeColor  = Color.White,
+                Font       = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold),
+                Alignment  = DataGridViewContentAlignment.MiddleCenter,
             },
-            ColumnHeadersHeight = 32,
-            RowTemplate = { Height = 24 },
-            EnableHeadersVisualStyles = false,
-            AutoGenerateColumns = false,
+            ColumnHeadersHeight        = 32,
+            RowTemplate                = { Height = 24 },
+            EnableHeadersVisualStyles  = false,
+            AutoGenerateColumns        = false,
         };
         BuildGridColumns();
 
         // ── 状态栏 ─────────────────────────────────────────────────────────
         _statusStrip = new StatusStrip();
-        _lblStatus = new ToolStripStatusLabel("正在自动启动后端，请稍候…") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+        _lblStatus     = new ToolStripStatusLabel("就绪 — 请点击「加载 / 刷新数据」获取数据")
+                         { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
         _lblUpdateTime = new ToolStripStatusLabel("") { Alignment = ToolStripItemAlignment.Right };
         _statusStrip.Items.AddRange(new ToolStripItem[] { _lblStatus, _lblUpdateTime });
 
@@ -206,7 +191,6 @@ public partial class MainForm : Form
         Controls.Add(_statusStrip);
 
         // ── 事件 ───────────────────────────────────────────────────────────
-        _btnStartBackend.Click += async (_, _) => await StartBackendAsync();
         _btnLoad.Click   += async (_, _) => await LoadDataAsync();
         _btnExport.Click += (_, _) => ExportCsv();
         _btnReset.Click  += (_, _) => ResetFilters();
@@ -219,16 +203,9 @@ public partial class MainForm : Form
         _numScaleMax.ValueChanged   += (_, _) => ApplyFilters();
         _grid.CellFormatting += Grid_CellFormatting;
         _grid.RowPrePaint    += Grid_RowPrePaint;
-        FormClosing          += (_, _) => _backend.Dispose();
 
-        // 监听后端输出（调试用）
-        _backend.OutputReceived += msg =>
-        {
-            System.Diagnostics.Debug.WriteLine($"[Backend] {msg}");
-        };
-
-        // 应用启动时自动拉起后端，无需手动点击
-        Load += async (_, _) => await StartBackendAsync();
+        // 启动时自动加载数据
+        Load += async (_, _) => await LoadDataAsync();
     }
 
     // ── 列定义 ────────────────────────────────────────────────────────────────
@@ -236,41 +213,41 @@ public partial class MainForm : Form
     {
         var cols = new (string header, string prop, int w, string? fmt, bool center)[]
         {
-            ("序号",       nameof(BondInfo.Index),             45, null,    true),
-            ("转债代码",   nameof(BondInfo.BondCode),          70, null,    true),
-            ("转债名称",   nameof(BondInfo.BondName),          90, null,    false),
-            ("现价(元)",   nameof(BondInfo.Price),             72, "N2",    true),
-            ("涨跌幅(%)",  nameof(BondInfo.ChangePercent),     72, "N2",    true),
-            ("正股名称",   nameof(BondInfo.StockName),         90, null,    false),
-            ("正股价",     nameof(BondInfo.StockPrice),        70, "N2",    true),
-            ("正股涨跌(%)",nameof(BondInfo.StockChange),       80, "N2",    true),
-            ("正股PB",     nameof(BondInfo.StockPB),           60, "N2",    true),
-            ("转股价",     nameof(BondInfo.ConversionPrice),   70, "N2",    true),
-            ("转股价值",   nameof(BondInfo.ConversionValue),   75, "N2",    true),
-            ("溢价率(%)",  nameof(BondInfo.PremiumRate),       75, "N2",    true),
-            ("债券评级",   nameof(BondInfo.CreditRating),      68, null,    true),
-            ("回售触发价", nameof(BondInfo.PutTriggerPrice),   80, "N2",    true),
-            ("回售天数",   nameof(BondInfo.PutTriggerDays),    68, null,    true),
-            ("强赎触发价", nameof(BondInfo.RedeemTriggerPrice),80, "N2",    true),
-            ("强赎天数",   nameof(BondInfo.RedeemTriggerDays), 68, null,    true),
-            ("强赎状态",   nameof(BondInfo.RedeemStatus),      90, null,    true),
-            ("转债占比(%)",nameof(BondInfo.BondRatio),         78, "N2",    true),
-            ("到期时间",   nameof(BondInfo.MaturityDate),      86, null,    true),
-            ("剩余年限",   nameof(BondInfo.RemainingYears),    70, "N2",    true),
-            ("剩余规模(亿)",nameof(BondInfo.RemainingScale),   82, "N2",    true),
+            ("序号",        nameof(BondInfo.Index),             45, null,  true),
+            ("转债代码",    nameof(BondInfo.BondCode),          70, null,  true),
+            ("转债名称",    nameof(BondInfo.BondName),          90, null,  false),
+            ("现价(元)",    nameof(BondInfo.Price),             72, "N2",  true),
+            ("涨跌幅(%)",   nameof(BondInfo.ChangePercent),     72, "N2",  true),
+            ("正股名称",    nameof(BondInfo.StockName),         90, null,  false),
+            ("正股价",      nameof(BondInfo.StockPrice),        70, "N2",  true),
+            ("正股涨跌(%)", nameof(BondInfo.StockChange),       80, "N2",  true),
+            ("正股PB",      nameof(BondInfo.StockPB),           60, "N2",  true),
+            ("转股价",      nameof(BondInfo.ConversionPrice),   70, "N2",  true),
+            ("转股价值",    nameof(BondInfo.ConversionValue),   75, "N2",  true),
+            ("溢价率(%)",   nameof(BondInfo.PremiumRate),       75, "N2",  true),
+            ("债券评级",    nameof(BondInfo.CreditRating),      68, null,  true),
+            ("回售触发价",  nameof(BondInfo.PutTriggerPrice),   80, "N2",  true),
+            ("回售天数",    nameof(BondInfo.PutTriggerDays),    68, null,  true),
+            ("强赎触发价",  nameof(BondInfo.RedeemTriggerPrice),80, "N2",  true),
+            ("强赎天数",    nameof(BondInfo.RedeemTriggerDays), 68, null,  true),
+            ("强赎状态",    nameof(BondInfo.RedeemStatus),      90, null,  true),
+            ("转债占比(%)", nameof(BondInfo.BondRatio),         78, "N2",  true),
+            ("到期时间",    nameof(BondInfo.MaturityDate),      86, null,  true),
+            ("剩余年限",    nameof(BondInfo.RemainingYears),    70, "N2",  true),
+            ("剩余规模(亿)",nameof(BondInfo.RemainingScale),    82, "N2",  true),
         };
 
         foreach (var (header, prop, w, fmt, center) in cols)
         {
             var col = new DataGridViewTextBoxColumn
             {
-                HeaderText = header,
+                HeaderText       = header,
                 DataPropertyName = prop,
-                Width = w,
-                SortMode = DataGridViewColumnSortMode.Automatic,
+                Width            = w,
+                SortMode         = DataGridViewColumnSortMode.Automatic,
                 DefaultCellStyle = new DataGridViewCellStyle
                 {
-                    Format = fmt ?? string.Empty,
+                    Format    = fmt ?? string.Empty,
                     Alignment = center
                         ? DataGridViewContentAlignment.MiddleCenter
                         : DataGridViewContentAlignment.MiddleLeft,
@@ -280,132 +257,74 @@ public partial class MainForm : Form
         }
     }
 
-    // ── 后端启动 ──────────────────────────────────────────────────────────────
-    private async Task StartBackendAsync()
-    {
-        if (_backend.IsRunning)
-        {
-            SetStatus("⚠ 后端进程已在运行，请直接点击「加载 / 刷新数据」。");
-            return;
-        }
-
-        var apiScript = BackendService.FindApiScript();
-        if (apiScript == null)
-        {
-            MessageBox.Show(
-                "未能找到 api.py 文件。\n\n请确认 WinForms 程序与 Python 项目文件位于同一目录或其父目录中。",
-                "找不到后端脚本",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            return;
-        }
-
-        var pythonExe = BackendService.FindPython(apiScript);
-
-        _btnStartBackend.Enabled = false;
-        _btnStartBackend.Text = "⏳ 正在启动…";
-        SetStatus("正在启动 Python 后端，请稍候…");
-
-        try
-        {
-            _backend.Start(pythonExe, apiScript);
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"❌ 启动后端失败：{ex.Message}");
-            MessageBox.Show(
-                $"无法启动 Python 后端：\n{ex.Message}\n\n"
-                + $"Python 路径：{pythonExe}\n"
-                + $"脚本路径：{apiScript}",
-                "启动失败",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            _btnStartBackend.Enabled = true;
-            _btnStartBackend.Text = "🔄 重启后端";
-            return;
-        }
-
-        // 轮询健康检查，最多等待 30 秒
-        _api?.Dispose();
-        _api = new ApiService(_txtServer.Text.Trim());
-
-        bool healthy = false;
-        for (int attempt = 0; attempt < BackendStartupTimeoutSeconds; attempt++)
-        {
-            SetStatus($"正在等待后端就绪… ({attempt + 1}/{BackendStartupTimeoutSeconds})");
-            await Task.Delay(1000);
-
-            if (!_backend.IsRunning)
-            {
-                SetStatus("❌ 后端进程意外退出，请检查 Python 环境与依赖。");
-                _btnStartBackend.Enabled = true;
-                _btnStartBackend.Text = "🔄 重启后端";
-                return;
-            }
-
-            if (await _api.IsHealthyAsync())
-            {
-                healthy = true;
-                break;
-            }
-        }
-
-        if (!healthy)
-        {
-            SetStatus("⚠ 后端启动超时，请手动检查 Python 环境后重试。");
-            _btnStartBackend.Enabled = true;
-            _btnStartBackend.Text = "🔄 重启后端";
-            return;
-        }
-
-        // 后端已就绪，自动加载数据
-        _btnStartBackend.Enabled = false;
-        _btnStartBackend.Text = "✅ 后端运行中";
-        _btnStartBackend.BackColor = ColRunning;
-        SetStatus("✅ 后端已启动，正在自动加载数据…");
-        await LoadDataAsync();
-    }
-
     // ── 数据加载 ──────────────────────────────────────────────────────────────
     private async Task LoadDataAsync()
     {
+        // 取消上一次尚未完成的加载
+        _loadCts?.Cancel();
+        _loadCts = new CancellationTokenSource();
+        var ct = _loadCts.Token;
+
         _btnLoad.Enabled = false;
-        _btnLoad.Text = "⏳ 加载中…";
-        SetStatus("正在连接后端并获取数据，请稍候…");
+        _btnLoad.Text    = "⏳ 加载中…";
+        SetStatus("正在连接 AKTools 并获取数据，请稍候…");
 
         try
         {
-            _api?.Dispose();
-            _api = new ApiService(_txtServer.Text.Trim());
+            using var aktools = new AkToolsService(_txtServer.Text.Trim());
 
-            var result = await _api.GetBondsAsync();
-            if (result?.Bonds == null || result.Bonds.Count == 0)
+            // 先做健康检查，给出更友好的错误提示
+            if (!await aktools.IsHealthyAsync(ct))
             {
-                SetStatus("⚠ 后端返回了空数据，请检查网络或数据源。");
+                SetStatus("⚠ 无法连接到 AKTools 服务，请确认已启动（python -m aktools）");
+                MessageBox.Show(
+                    "无法连接到 AKTools 服务。\n\n" +
+                    "请按以下步骤启动 AKTools：\n" +
+                    "  1. 安装：pip install aktools\n" +
+                    "  2. 启动：python -m aktools\n" +
+                    "  3. 确认 AKTools 监听在：" + _txtServer.Text.Trim() + "\n\n" +
+                    "启动后请再次点击「加载 / 刷新数据」。",
+                    "AKTools 未就绪",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
                 return;
             }
 
-            _allBonds = result.Bonds;
+            using var svc = new BondDataService(aktools);
+            var (bonds, lastUpdate) = await svc.GetBondsAsync(ct);
+
+            if (bonds.Count == 0)
+            {
+                SetStatus("⚠ 未获取到数据，请检查网络或 AKTools 版本。");
+                return;
+            }
+
+            _allBonds = bonds;
             ApplyFilters();
             _btnExport.Enabled = true;
-            _lblUpdateTime.Text = $"最后更新：{result.LastUpdate}";
+            _lblUpdateTime.Text = $"最后更新：{lastUpdate}";
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("已取消加载。");
         }
         catch (Exception ex)
         {
             SetStatus($"❌ 加载失败：{ex.Message}");
             MessageBox.Show(
-                $"无法从后端获取数据：\n{ex.Message}\n\n"
-                + "请确认：\n"
-                + "1. 后端服务是否已正常启动（可点击「🔄 重启后端」按钮重试）\n"
-                + "2. 后端地址输入正确",
-                "连接失败",
+                $"获取数据时发生错误：\n{ex.Message}\n\n" +
+                "请确认：\n" +
+                "1. AKTools 服务已正常启动（python -m aktools）\n" +
+                "2. AKTools 地址填写正确\n" +
+                "3. 网络可正常访问数据源",
+                "加载失败",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
         finally
         {
             _btnLoad.Enabled = true;
-            _btnLoad.Text = "🔄 加载 / 刷新数据";
+            _btnLoad.Text    = "🔄 加载 / 刷新数据";
         }
     }
 
@@ -414,24 +333,24 @@ public partial class MainForm : Form
     {
         if (_allBonds.Count == 0) return;
 
-        double priceMin  = (double)_numPriceMin.Value;
-        double priceMax  = (double)_numPriceMax.Value;
-        double premMin   = (double)_numPremiumMin.Value;
-        double premMax   = (double)_numPremiumMax.Value;
-        double yearsMin  = (double)_numYearsMin.Value;
-        double yearsMax  = (double)_numYearsMax.Value;
-        double scaleMax  = (double)_numScaleMax.Value;
+        double priceMin = (double)_numPriceMin.Value;
+        double priceMax = (double)_numPriceMax.Value;
+        double premMin  = (double)_numPremiumMin.Value;
+        double premMax  = (double)_numPremiumMax.Value;
+        double yearsMin = (double)_numYearsMin.Value;
+        double yearsMax = (double)_numYearsMax.Value;
+        double scaleMax = (double)_numScaleMax.Value;
 
         var filtered = _allBonds.Where(b =>
         {
-            if (b.Price.HasValue && (b.Price < priceMin || b.Price > priceMax)) return false;
-            if (b.PremiumRate.HasValue && (b.PremiumRate < premMin || b.PremiumRate > premMax)) return false;
+            if (b.Price.HasValue         && (b.Price         < priceMin || b.Price         > priceMax)) return false;
+            if (b.PremiumRate.HasValue   && (b.PremiumRate   < premMin  || b.PremiumRate   > premMax))  return false;
             if (b.RemainingYears.HasValue && (b.RemainingYears < yearsMin || b.RemainingYears > yearsMax)) return false;
             if (scaleMax < 500 && b.RemainingScale.HasValue && b.RemainingScale > scaleMax) return false;
             return true;
         }).ToList();
 
-        // Renumber after filtering
+        // 过滤后重新编号
         for (int i = 0; i < filtered.Count; i++)
             filtered[i].Index = i + 1;
 
@@ -477,14 +396,13 @@ public partial class MainForm : Form
         var row = _grid.Rows[e.RowIndex];
         if (row.DataBoundItem is not BondInfo bond) return;
 
-        // Colour-code change percentage cells
         var col = _grid.Columns[e.ColumnIndex];
         if (col.DataPropertyName is nameof(BondInfo.ChangePercent) or nameof(BondInfo.StockChange))
         {
             if (e.Value is double v && e.CellStyle != null)
             {
                 e.CellStyle.ForeColor = v >= 0 ? Color.DarkRed : Color.DarkGreen;
-                e.FormattingApplied = true;
+                e.FormattingApplied   = true;
             }
         }
     }
@@ -496,7 +414,7 @@ public partial class MainForm : Form
 
         using var dlg = new SaveFileDialog
         {
-            Filter = "CSV 文件 (*.csv)|*.csv",
+            Filter   = "CSV 文件 (*.csv)|*.csv",
             FileName = $"可转债数据_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
         };
         if (dlg.ShowDialog() != DialogResult.OK) return;
@@ -504,11 +422,9 @@ public partial class MainForm : Form
         try
         {
             using var sw = new System.IO.StreamWriter(
-                dlg.FileName,
-                append: false,
+                dlg.FileName, append: false,
                 encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
-            // Header
             sw.WriteLine(
                 "序号,转债代码,转债名称,现价,涨跌幅,正股名称,正股价,正股涨跌,正股PB," +
                 "转股价,转股价值,转股溢价率,债券评级,回售触发价,回售触发天数," +
@@ -537,15 +453,14 @@ public partial class MainForm : Form
     }
 
     // ── 辅助方法 ──────────────────────────────────────────────────────────────
-    private void SetStatus(string text) =>
-        _lblStatus.Text = text;
+    private void SetStatus(string text) => _lblStatus.Text = text;
 
     private static Label MakeLabel(string text) => new()
     {
-        Text = text,
-        AutoSize = true,
+        Text      = text,
+        AutoSize  = true,
         TextAlign = ContentAlignment.MiddleLeft,
-        Margin = new Padding(4, 6, 2, 0),
+        Margin    = new Padding(4, 6, 2, 0),
     };
 
     private static (NumericUpDown min, NumericUpDown max) MakeRangePair(
