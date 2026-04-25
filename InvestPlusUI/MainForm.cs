@@ -43,11 +43,13 @@ public partial class MainForm : Form
     private readonly BackendService _backend = new();
 
     // ── 颜色预警阈值 ─────────────────────────────────────────────────────────
-    private static readonly Color ColYellow = Color.FromArgb(255, 243, 205);   // 接近强赎
-    private static readonly Color ColRed    = Color.FromArgb(248, 215, 218);   // 回售风险
+    private static readonly Color ColYellow  = Color.FromArgb(255, 243, 205);   // 接近强赎
+    private static readonly Color ColRed     = Color.FromArgb(248, 215, 218);   // 回售风险
+    private static readonly Color ColRunning = Color.FromArgb(108, 117, 125);   // 后端运行中
     private const int RedeemWarningMin = 10;   // 强赎预警下限（天）
     private const int RedeemWarningMax = 15;   // 强赎预警上限（天）
     private const int PutWarningThreshold = 25; // 回售风险阈值（天）
+    private const int BackendStartupTimeoutSeconds = 30; // 后端启动超时（秒）
 
     public MainForm()
     {
@@ -325,9 +327,9 @@ public partial class MainForm : Form
         _api = new ApiService(_txtServer.Text.Trim());
 
         bool healthy = false;
-        for (int i = 0; i < 30; i++)
+        for (int attempt = 0; attempt < BackendStartupTimeoutSeconds; attempt++)
         {
-            SetStatus($"正在等待后端就绪… ({i + 1}/30)");
+            SetStatus($"正在等待后端就绪… ({attempt + 1}/{BackendStartupTimeoutSeconds})");
             await Task.Delay(1000);
 
             if (!_backend.IsRunning)
@@ -356,7 +358,7 @@ public partial class MainForm : Form
         // 后端已就绪，自动加载数据
         _btnStartBackend.Enabled = false;
         _btnStartBackend.Text = "✅ 后端运行中";
-        _btnStartBackend.BackColor = Color.FromArgb(108, 117, 125);
+        _btnStartBackend.BackColor = ColRunning;
         SetStatus("✅ 后端已启动，正在自动加载数据…");
         await LoadDataAsync();
     }

@@ -32,7 +32,7 @@ public sealed class BackendService : IDisposable
     public static string? FindApiScript()
     {
         var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 5; i++)
+        for (int levelsUp = 0; levelsUp < 5; levelsUp++)
         {
             if (string.IsNullOrEmpty(dir)) break;
             var candidate = Path.Combine(dir, "api.py");
