@@ -83,7 +83,7 @@ public partial class MainForm : Form
         };
         _btnStartBackend = new Button
         {
-            Text = "▶ 启动后端",
+            Text = "🔄 重启后端",
             Width = 110,
             Height = 28,
             Margin = new Padding(0, 2, 8, 0),
@@ -195,7 +195,7 @@ public partial class MainForm : Form
 
         // ── 状态栏 ─────────────────────────────────────────────────────────
         _statusStrip = new StatusStrip();
-        _lblStatus = new ToolStripStatusLabel("点击「▶ 启动后端」一键启动，或直接点击「加载 / 刷新数据」连接已运行的后端") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+        _lblStatus = new ToolStripStatusLabel("正在自动启动后端，请稍候…") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
         _lblUpdateTime = new ToolStripStatusLabel("") { Alignment = ToolStripItemAlignment.Right };
         _statusStrip.Items.AddRange(new ToolStripItem[] { _lblStatus, _lblUpdateTime });
 
@@ -226,6 +226,9 @@ public partial class MainForm : Form
         {
             System.Diagnostics.Debug.WriteLine($"[Backend] {msg}");
         };
+
+        // 应用启动时自动拉起后端，无需手动点击
+        Load += async (_, _) => await StartBackendAsync();
     }
 
     // ── 列定义 ────────────────────────────────────────────────────────────────
@@ -318,7 +321,7 @@ public partial class MainForm : Form
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
             _btnStartBackend.Enabled = true;
-            _btnStartBackend.Text = "▶ 启动后端";
+            _btnStartBackend.Text = "🔄 重启后端";
             return;
         }
 
@@ -336,7 +339,7 @@ public partial class MainForm : Form
             {
                 SetStatus("❌ 后端进程意外退出，请检查 Python 环境与依赖。");
                 _btnStartBackend.Enabled = true;
-                _btnStartBackend.Text = "▶ 启动后端";
+                _btnStartBackend.Text = "🔄 重启后端";
                 return;
             }
 
@@ -351,7 +354,7 @@ public partial class MainForm : Form
         {
             SetStatus("⚠ 后端启动超时，请手动检查 Python 环境后重试。");
             _btnStartBackend.Enabled = true;
-            _btnStartBackend.Text = "▶ 启动后端";
+            _btnStartBackend.Text = "🔄 重启后端";
             return;
         }
 
@@ -393,7 +396,7 @@ public partial class MainForm : Form
             MessageBox.Show(
                 $"无法从后端获取数据：\n{ex.Message}\n\n"
                 + "请确认：\n"
-                + "1. 已点击「▶ 启动后端」按钮（或手动运行 python api.py）\n"
+                + "1. 后端服务是否已正常启动（可点击「🔄 重启后端」按钮重试）\n"
                 + "2. 后端地址输入正确",
                 "连接失败",
                 MessageBoxButtons.OK,
