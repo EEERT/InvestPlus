@@ -9,7 +9,7 @@ namespace InvestPlusUI;
 /// 主窗体：可转债行情监测界面。
 ///
 /// 布局（从上至下）：
-///   工具栏   ─ 服务器地址输入框、「加载/刷新数据」按钮、「导出 CSV」按钮
+///   工具栏   ─ 「启动后端」按钮、服务器地址输入框、「加载/刷新数据」按钮、「导出 CSV」按钮
 ///   筛选区   ─ 价格区间、转股溢价率区间、剩余年限区间、剩余规模上限
 ///   数据表格 ─ DataGridView，支持列排序、行色彩预警
 ///   状态栏   ─ 符合条件数量、最后更新时间
@@ -18,6 +18,7 @@ public partial class MainForm : Form
 {
     // ── 控件 ─────────────────────────────────────────────────────────────────
     private readonly TextBox _txtServer;
+    private readonly Button _btnStartBackend;
     private readonly Button _btnLoad;
     private readonly Button _btnExport;
 
@@ -39,13 +40,16 @@ public partial class MainForm : Form
     // ── 数据 ─────────────────────────────────────────────────────────────────
     private List<BondInfo> _allBonds = new();
     private ApiService? _api;
+    private readonly BackendService _backend = new();
 
     // ── 颜色预警阈值 ─────────────────────────────────────────────────────────
-    private static readonly Color ColYellow = Color.FromArgb(255, 243, 205);   // 接近强赎
-    private static readonly Color ColRed    = Color.FromArgb(248, 215, 218);   // 回售风险
+    private static readonly Color ColYellow  = Color.FromArgb(255, 243, 205);   // 接近强赎
+    private static readonly Color ColRed     = Color.FromArgb(248, 215, 218);   // 回售风险
+    private static readonly Color ColRunning = Color.FromArgb(108, 117, 125);   // 后端运行中
     private const int RedeemWarningMin = 10;   // 强赎预警下限（天）
     private const int RedeemWarningMax = 15;   // 强赎预警上限（天）
     private const int PutWarningThreshold = 25; // 回售风险阈值（天）
+    private const int BackendStartupTimeoutSeconds = 30; // 后端启动超时（秒）
 
     public MainForm()
     {
@@ -77,6 +81,18 @@ public partial class MainForm : Form
             Width = 220,
             Margin = new Padding(0, 4, 8, 0),
         };
+        _btnStartBackend = new Button
+        {
+            Text = "▶ 启动后端",
+            Width = 110,
+            Height = 28,
+            Margin = new Padding(0, 2, 8, 0),
+            UseVisualStyleBackColor = true,
+            BackColor = Color.FromArgb(40, 167, 69),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+        };
+        _btnStartBackend.FlatAppearance.BorderSize = 0;
         _btnLoad = new Button
         {
             Text = "🔄 加载 / 刷新数据",
@@ -102,7 +118,7 @@ public partial class MainForm : Form
             WrapContents = false,
             AutoSize = true,
         };
-        flow.Controls.AddRange(new Control[] { lblServer, _txtServer, _btnLoad, _btnExport });
+        flow.Controls.AddRange(new Control[] { lblServer, _txtServer, _btnStartBackend, _btnLoad, _btnExport });
         toolbar.Controls.Add(flow);
 
         // ── 筛选区 ─────────────────────────────────────────────────────────
@@ -179,7 +195,7 @@ public partial class MainForm : Form
 
         // ── 状态栏 ─────────────────────────────────────────────────────────
         _statusStrip = new StatusStrip();
-        _lblStatus = new ToolStripStatusLabel("请点击「加载 / 刷新数据」") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+        _lblStatus = new ToolStripStatusLabel("点击「▶ 启动后端」一键启动，或直接点击「加载 / 刷新数据」连接已运行的后端") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
         _lblUpdateTime = new ToolStripStatusLabel("") { Alignment = ToolStripItemAlignment.Right };
         _statusStrip.Items.AddRange(new ToolStripItem[] { _lblStatus, _lblUpdateTime });
 
@@ -190,6 +206,7 @@ public partial class MainForm : Form
         Controls.Add(_statusStrip);
 
         // ── 事件 ───────────────────────────────────────────────────────────
+        _btnStartBackend.Click += async (_, _) => await StartBackendAsync();
         _btnLoad.Click   += async (_, _) => await LoadDataAsync();
         _btnExport.Click += (_, _) => ExportCsv();
         _btnReset.Click  += (_, _) => ResetFilters();
@@ -202,6 +219,13 @@ public partial class MainForm : Form
         _numScaleMax.ValueChanged   += (_, _) => ApplyFilters();
         _grid.CellFormatting += Grid_CellFormatting;
         _grid.RowPrePaint    += Grid_RowPrePaint;
+        FormClosing          += (_, _) => _backend.Dispose();
+
+        // 监听后端输出（调试用）
+        _backend.OutputReceived += msg =>
+        {
+            System.Diagnostics.Debug.WriteLine($"[Backend] {msg}");
+        };
     }
 
     // ── 列定义 ────────────────────────────────────────────────────────────────
@@ -253,6 +277,92 @@ public partial class MainForm : Form
         }
     }
 
+    // ── 后端启动 ──────────────────────────────────────────────────────────────
+    private async Task StartBackendAsync()
+    {
+        if (_backend.IsRunning)
+        {
+            SetStatus("⚠ 后端进程已在运行，请直接点击「加载 / 刷新数据」。");
+            return;
+        }
+
+        var apiScript = BackendService.FindApiScript();
+        if (apiScript == null)
+        {
+            MessageBox.Show(
+                "未能找到 api.py 文件。\n\n请确认 WinForms 程序与 Python 项目文件位于同一目录或其父目录中。",
+                "找不到后端脚本",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
+
+        var pythonExe = BackendService.FindPython(apiScript);
+
+        _btnStartBackend.Enabled = false;
+        _btnStartBackend.Text = "⏳ 正在启动…";
+        SetStatus("正在启动 Python 后端，请稍候…");
+
+        try
+        {
+            _backend.Start(pythonExe, apiScript);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"❌ 启动后端失败：{ex.Message}");
+            MessageBox.Show(
+                $"无法启动 Python 后端：\n{ex.Message}\n\n"
+                + $"Python 路径：{pythonExe}\n"
+                + $"脚本路径：{apiScript}",
+                "启动失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            _btnStartBackend.Enabled = true;
+            _btnStartBackend.Text = "▶ 启动后端";
+            return;
+        }
+
+        // 轮询健康检查，最多等待 30 秒
+        _api?.Dispose();
+        _api = new ApiService(_txtServer.Text.Trim());
+
+        bool healthy = false;
+        for (int attempt = 0; attempt < BackendStartupTimeoutSeconds; attempt++)
+        {
+            SetStatus($"正在等待后端就绪… ({attempt + 1}/{BackendStartupTimeoutSeconds})");
+            await Task.Delay(1000);
+
+            if (!_backend.IsRunning)
+            {
+                SetStatus("❌ 后端进程意外退出，请检查 Python 环境与依赖。");
+                _btnStartBackend.Enabled = true;
+                _btnStartBackend.Text = "▶ 启动后端";
+                return;
+            }
+
+            if (await _api.IsHealthyAsync())
+            {
+                healthy = true;
+                break;
+            }
+        }
+
+        if (!healthy)
+        {
+            SetStatus("⚠ 后端启动超时，请手动检查 Python 环境后重试。");
+            _btnStartBackend.Enabled = true;
+            _btnStartBackend.Text = "▶ 启动后端";
+            return;
+        }
+
+        // 后端已就绪，自动加载数据
+        _btnStartBackend.Enabled = false;
+        _btnStartBackend.Text = "✅ 后端运行中";
+        _btnStartBackend.BackColor = ColRunning;
+        SetStatus("✅ 后端已启动，正在自动加载数据…");
+        await LoadDataAsync();
+    }
+
     // ── 数据加载 ──────────────────────────────────────────────────────────────
     private async Task LoadDataAsync()
     {
@@ -283,7 +393,7 @@ public partial class MainForm : Form
             MessageBox.Show(
                 $"无法从后端获取数据：\n{ex.Message}\n\n"
                 + "请确认：\n"
-                + "1. Python 后端已启动（python api.py 或 uvicorn api:app --port 8000）\n"
+                + "1. 已点击「▶ 启动后端」按钮（或手动运行 python api.py）\n"
                 + "2. 后端地址输入正确",
                 "连接失败",
                 MessageBoxButtons.OK,
