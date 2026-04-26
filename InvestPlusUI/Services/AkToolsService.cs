@@ -66,7 +66,7 @@ public sealed class AkToolsService : IDisposable
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(5));
-            var resp = await _client.GetAsync("", cts.Token);
+            var resp = await _client.GetAsync("version", cts.Token);
             return resp.IsSuccessStatusCode;
         }
         catch
