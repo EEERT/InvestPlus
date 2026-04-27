@@ -1,86 +1,147 @@
+using System.Diagnostics;
 using System.Globalization;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using InvestPlusUI.Models;
 
 namespace InvestPlusUI.Services;
 
 /// <summary>
-/// 协调从 AKTools 和东方财富获取可转债数据，完成多源合并与衍生字段计算。
+/// 可转债多源数据协调服务。
 ///
-/// 数据来源：
-/// 1. AKTools bond_cov_comparison  — 东方财富实时行情（当前交易中的转债）
-/// 2. AKTools bond_cb_redeem_jsl   — 集思录强赎倒计时
-/// 3. 东方财富 RPT_BOND_CB_LIST    — 债券评级、到期时间、剩余规模、正股PB（直接 HTTP 调用）
+/// 本服务并行调用以下三个数据源，将结果合并为完整的 BondInfo 列表：
 ///
-/// 合并逻辑参考原 Python utils/calculations.py merge_bond_data 函数。
+///   1. 东方财富 Push2 实时行情（EastmoneyPush2Service）
+///      提供：现价、涨跌幅、正股价/涨跌、转股价/价值/溢价率、强赎/回售触发价
+///      频率：每次刷新都重新获取（数据随交易实时变化）
+///
+///   2. 集思录强赎数据（JisiluService）
+///      提供：强赎天计数、强赎状态
+///      频率：每次刷新都重新获取（强赎天数每个交易日都可能变化）
+///
+///   3. 东方财富 RPT_BOND_CB_LIST 详情（EastmoneyService）
+///      提供：转债名称（修正版）、债券评级、到期时间、剩余规模、正股 P/B
+///      频率：本地缓存 10 分钟（这些静态数据变化极少，无需每次刷新）
+///
+/// 合并逻辑：
+///   以 Push2 数据为主线（含全部在市转债），
+///   通过规范化的 6 位转债代码做 left join 附加集思录和东方财富详情数据。
 /// </summary>
 public sealed class BondDataService : IDisposable
 {
-    private readonly AkToolsService _aktools;
-    private readonly EastmoneyService _eastmoney = new();
-
-    public BondDataService(AkToolsService aktools) => _aktools = aktools;
-
-    // ── 公共入口 ─────────────────────────────────────────────────────────────
+    // ── 共享常量 ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// 并行获取三路数据并合并，返回可转债列表与更新时间。
+    /// 东方财富用于表示"无有效数据"的特殊占位值（-9999.99 或更小）。
+    /// push2 和数据中心接口在字段无数据时均可能返回此值，过滤时需统一处理。
     /// </summary>
-    public async Task<(List<BondInfo> bonds, string lastUpdate)> GetBondsAsync(
+    internal const double EastmoneyInvalidValue = -9999.99;
+
+    // ── 服务实例 ──────────────────────────────────────────────────────────────
+
+    /// <summary>东方财富 push2 实时行情服务（替代原 AKTools bond_cov_comparison）</summary>
+    private readonly EastmoneyPush2Service _push2 = new();
+
+    /// <summary>东方财富 RPT_BOND_CB_LIST 债券详情服务</summary>
+    private readonly EastmoneyService _detail = new();
+
+    /// <summary>集思录强赎数据服务（替代原 AKTools bond_cb_redeem_jsl）</summary>
+    private readonly JisiluService _jisilu = new();
+
+    // ── 详情数据缓存 ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 东方财富债券详情缓存数据（评级、到期时间等静态字段）。
+    /// 评级调整、规模变化等事件发生频率极低，10 分钟缓存足够准确，
+    /// 同时大幅减少重复的 HTTP 请求，提高整体刷新速度。
+    /// </summary>
+    private List<Dictionary<string, string?>>? _cachedDetails;
+
+    /// <summary>缓存写入时间，用于判断是否过期</summary>
+    private DateTime _detailsCachedAt = DateTime.MinValue;
+
+    /// <summary>详情缓存有效期（10 分钟）</summary>
+    private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(10);
+
+    // ── 公共入口 ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 并行获取全部数据源并合并，返回可转债列表及数据更新时间字符串。
+    ///
+    /// 返回值含义：
+    ///   bonds 为空列表时，可能是：
+    ///     a) Push2 请求失败（调用方通过 lastUpdate 中的提示区分）
+    ///     b) 非交易时段，Push2 返回空列表（正常现象）
+    ///   bonds 非空时，为正常合并结果。
+    /// </summary>
+    public async Task<(List<BondInfo> bonds, string lastUpdate, bool isNetworkError)> GetBondsAsync(
         CancellationToken ct = default)
     {
-        // 并行发起三路请求
-        var compTask    = _aktools.FetchAsync("bond_cov_comparison", ct: ct);
-        var redeemTask  = _aktools.FetchAsync("bond_cb_redeem_jsl",  ct: ct);
-        var detailTask  = _eastmoney.FetchBondDetailsAsync(ct);
+        // ── 并行启动请求 ────────────────────────────────────────────────────────
+        // Push2 和集思录每次都刷新（实时数据）
+        var push2Task  = _push2.FetchBondListAsync(ct);
+        var jisiluTask = _jisilu.FetchRedeemDataAsync(ct);
 
-        await Task.WhenAll(compTask, redeemTask, detailTask);
+        // 东方财富详情：缓存未过期时直接使用缓存，避免重复网络请求
+        bool useCache = _cachedDetails != null &&
+                        DateTime.Now - _detailsCachedAt < CacheDuration;
+        var detailTask = useCache
+            ? Task.FromResult<List<Dictionary<string, string?>>?>(_cachedDetails)
+            : _detail.FetchBondDetailsAsync(ct);
 
-        var comparison = await compTask;
-        var redeem     = await redeemTask;
-        var detail     = await detailTask;
+        // 等待全部请求完成（并行执行，总耗时取决于最慢的那个）
+        await Task.WhenAll(push2Task, jisiluTask, detailTask);
 
-        var bonds = MergeData(comparison, redeem, detail);
-        return (bonds, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        var push2Data  = await push2Task;
+        var redeemData = await jisiluTask;
+        var detailData = await detailTask;
+
+        // ── 更新详情缓存 ────────────────────────────────────────────────────────
+        if (!useCache && detailData != null)
+        {
+            _cachedDetails   = detailData;
+            _detailsCachedAt = DateTime.Now;
+        }
+        // 若本次请求失败，回退使用旧缓存（降级处理，保证页面不空白）
+        var detailToUse = detailData ?? _cachedDetails;
+
+        // ── 合并数据 ────────────────────────────────────────────────────────────
+        // push2Data == null 表示网络/API 错误；push2Data 为空列表表示非交易时段无数据
+        bool isNetworkError = push2Data == null;
+        var bonds = MergeData(push2Data, redeemData, detailToUse);
+        return (bonds, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), isNetworkError);
     }
 
-    // ── JSON 字段提取辅助方法 ─────────────────────────────────────────────────
+    // ── 字段提取辅助方法 ──────────────────────────────────────────────────────
 
-    /// <summary>按候选列名顺序查找并返回 double 值；找不到则返回 null。</summary>
-    private static double? GetDouble(
-        Dictionary<string, JsonElement> row, params string[] names)
+    /// <summary>
+    /// 按候选字段名列表，从字典中依次查找并返回第一个有效的 double 值。
+    /// 自动过滤：null、空串、"-"、"--"、东方财富特殊占位值（-9999.99 等）。
+    /// </summary>
+    private static double? GetDouble(Dictionary<string, string?> row, params string[] names)
     {
         foreach (var name in names)
         {
-            if (!row.TryGetValue(name, out var el)) continue;
-            if (el.ValueKind == JsonValueKind.Number)
-                return el.GetDouble();
-            if (el.ValueKind == JsonValueKind.String)
-            {
-                var s = el.GetString();
-                if (!string.IsNullOrWhiteSpace(s) && s != "-" && s != "--" &&
-                    double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d))
-                    return d;
-            }
+            if (!row.TryGetValue(name, out var s) || string.IsNullOrWhiteSpace(s)) continue;
+            if (s == "-" || s == "--") continue;
+            if (!double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d)) continue;
+            // 过滤东方财富的"无数据"特殊值（-9999.99 或 -9999）
+            if (Math.Abs(d - EastmoneyInvalidValue) < 0.01 || d <= -9999) continue;
+            return d;
         }
         return null;
     }
 
-    /// <summary>按候选列名顺序查找并返回字符串值；空/"-"视为 null。</summary>
-    private static string? GetString(
-        Dictionary<string, JsonElement> row, params string[] names)
+    /// <summary>
+    /// 按候选字段名列表，从字典中依次查找并返回第一个有效的字符串值。
+    /// 自动过滤：null、空串、"-"、"--"。
+    /// </summary>
+    private static string? GetString(Dictionary<string, string?> row, params string[] names)
     {
         foreach (var name in names)
         {
-            if (!row.TryGetValue(name, out var el)) continue;
-            if (el.ValueKind == JsonValueKind.String)
-            {
-                var s = el.GetString();
-                return string.IsNullOrWhiteSpace(s) || s == "-" || s == "--" ? null : s;
-            }
-            if (el.ValueKind == JsonValueKind.Number)
-                return el.GetRawText();
+            if (!row.TryGetValue(name, out var s)) continue;
+            if (string.IsNullOrWhiteSpace(s) || s == "-" || s == "--") continue;
+            return s;
         }
         return null;
     }
@@ -88,23 +149,32 @@ public sealed class BondDataService : IDisposable
     // ── 代码规范化 ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// 去除 SH/SZ/BJ 前缀、去除浮点尾缀（如 127018.0），标准化为 6 位字符串。
+    /// 将各来源的转债代码统一规范化为 6 位纯数字字符串，
+    /// 方便在不同数据源之间做关联匹配（left join）。
+    ///
+    /// 处理场景：
+    ///   "SH127018" / "SZ127018" → "127018"（去除交易所前缀）
+    ///   "127018.0"              → "127018"（去除浮点 .0 后缀）
+    ///   "127018"                → "127018"（无需变化）
+    ///   "12701"（5 位）         → "012701"（补零至 6 位）
     /// </summary>
     private static string NormalizeCode(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
 
         var s = Regex.Replace(raw.Trim(), @"^(SH|SZ|BJ)", "", RegexOptions.IgnoreCase);
-        // 去除 "110044.0" 这类浮点后缀
-        s = Regex.Replace(s, @"\.0+$", "");
-        // 若为纯数字（可能来自 akshare 的 float→str 转换），补零至 6 位
+        s = Regex.Replace(s, @"\.0+$", ""); // 去掉 .0 后缀
         if (long.TryParse(s, out var num))
-            return num.ToString().PadLeft(6, '0');
+            return num.ToString().PadLeft(6, '0'); // 纯数字时补零至 6 位
         return s;
     }
 
     // ── 衍生字段计算 ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// 计算转股价值：正股价 / 转股价 × 100（转债面值为 100 元）。
+    /// 含义：若将转债立即转换为正股，价值相当于多少元。
+    /// </summary>
     private static double? CalcConversionValue(double? stockPrice, double? convPrice)
     {
         if (stockPrice.HasValue && convPrice.HasValue && convPrice.Value > 0)
@@ -112,6 +182,10 @@ public sealed class BondDataService : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// 计算转股溢价率：(转债现价 / 转股价值 - 1) × 100%。
+    /// 含义：转债相对于其转股价值的溢价百分比；负值表示折价（破面）。
+    /// </summary>
     private static double? CalcPremiumRate(double? bondPrice, double? convValue)
     {
         if (bondPrice.HasValue && convValue.HasValue && convValue.Value > 0)
@@ -119,6 +193,10 @@ public sealed class BondDataService : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// 计算剩余年限（从今天到到期日的年数，精确到小数点后 4 位）。
+    /// 已到期的转债返回 0（不返回负数）。
+    /// </summary>
     private static double? CalcRemainingYears(DateTime? maturity)
     {
         if (!maturity.HasValue) return null;
@@ -128,21 +206,46 @@ public sealed class BondDataService : IDisposable
 
     // ── 核心合并逻辑 ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// 将三路数据合并成 BondInfo 列表。
+    ///
+    /// 合并策略：
+    ///   以 Push2 数据（push2Data）为"左表"主线，
+    ///   集思录强赎数据（redeemData）和东方财富详情（detailData）作为"右表"，
+    ///   通过 6 位规范化转债代码做 left join（右表无对应数据时字段保持 null）。
+    ///
+    /// 参数说明：
+    ///   push2Data  - 东方财富 push2 实时行情，key 为中文字段名
+    ///   redeemData - 集思录强赎数据，key 为规范化转债代码
+    ///   detailData - 东方财富 RPT_BOND_CB_LIST 详情，key 为东方财富原始英文字段名
+    /// </summary>
     private List<BondInfo> MergeData(
-        List<Dictionary<string, JsonElement>>? comparison,
-        List<Dictionary<string, JsonElement>>? redeem,
-        List<Dictionary<string, string?>>? detail)
+        List<Dictionary<string, string?>>?                     push2Data,
+        Dictionary<string, (int? days, string? status)>?       redeemData,
+        List<Dictionary<string, string?>>?                     detailData)
     {
-        if (comparison == null || comparison.Count == 0)
+        // Push2 数据是主数据源：
+        //   null  = 请求失败（网络错误），无法继续
+        //   空列表 = 非交易时段无数据，同样无法展示行情，直接返回
+        if (push2Data == null)
+        {
+            System.Diagnostics.Debug.WriteLine("[BondDataService] Push2 请求失败，无法合并数据");
             return new List<BondInfo>();
+        }
+        if (push2Data.Count == 0)
+        {
+            System.Diagnostics.Debug.WriteLine("[BondDataService] Push2 返回空列表（可能为非交易时段）");
+            return new List<BondInfo>();
+        }
 
-        // ── 1. 构建东方财富详情查找表（转债代码 → 详情行） ────────────────────
+        // ── 1. 构建东方财富详情查找表（规范化转债代码 → 详情行） ────────────────
         var detailByCode = new Dictionary<string, Dictionary<string, string?>>(
             StringComparer.OrdinalIgnoreCase);
-        if (detail != null)
+        if (detailData != null)
         {
-            foreach (var row in detail)
+            foreach (var row in detailData)
             {
+                // RPT_BOND_CB_LIST 的转债代码字段为 SECURITY_CODE
                 var code = row.GetValueOrDefault("SECURITY_CODE");
                 if (string.IsNullOrEmpty(code)) continue;
                 var norm = NormalizeCode(code);
@@ -151,79 +254,44 @@ public sealed class BondDataService : IDisposable
             }
         }
 
-        // ── 2. 构建集思录强赎查找表（转债代码 → 天数 + 状态） ────────────────
-        var redeemByCode = new Dictionary<string, (int? days, string? status)>(
-            StringComparer.OrdinalIgnoreCase);
-        if (redeem != null)
-        {
-            foreach (var row in redeem)
-            {
-                var code = GetString(row, "代码", "转债代码", "bond_code");
-                if (string.IsNullOrEmpty(code)) continue;
-                var norm = NormalizeCode(code);
-                if (string.IsNullOrEmpty(norm)) continue;
-
-                // 天数字段：多种可能的列名
-                var daysDouble = GetDouble(row,
-                    "强赎天计数", "已满足天数", "满足天数", "强赎天数", "redeem_days", "days");
-                int? days = daysDouble.HasValue ? (int)daysDouble.Value : null;
-
-                // 若天数来自字符串（如 "15天"），提取数字部分
-                if (!days.HasValue)
-                {
-                    var dStr = GetString(row,
-                        "强赎天计数", "已满足天数", "满足天数", "强赎天数", "redeem_days", "days");
-                    if (dStr != null)
-                    {
-                        var m = Regex.Match(dStr, @"\d+");
-                        if (m.Success && int.TryParse(m.Value, out var di))
-                            days = di;
-                    }
-                }
-
-                var status = GetString(row, "强赎状态", "redeem_status", "状态");
-                redeemByCode[norm] = (days, status);
-            }
-        }
-
-        // ── 3. 遍历 comparison 数据，构建 BondInfo 列表 ───────────────────────
+        // ── 2. 遍历 Push2 数据，构建 BondInfo 列表 ────────────────────────────
         var result = new List<BondInfo>();
 
-        foreach (var row in comparison)
+        foreach (var row in push2Data)
         {
-            // 转债代码
-            var bondCode = GetString(row, "转债代码", "bond_code", "cb_code", "代码", "债券代码");
+            // 转债代码：Push2 的 "转债代码" 字段（已通过 FieldMap 映射）
+            var bondCode = GetString(row, "转债代码");
             if (string.IsNullOrEmpty(bondCode)) continue;
             var normCode = NormalizeCode(bondCode);
             if (string.IsNullOrEmpty(normCode)) continue;
 
-            // 基本行情字段
-            var price         = GetDouble(row, "转债最新价", "转债现价", "债现价", "现价");
-            var changePercent = GetDouble(row, "转债涨跌幅", "转债涨跌");
-            var bondName      = GetString(row, "转债名称", "bond_name", "cb_name", "名称", "债券简称");
-            var stockCode     = GetString(row, "正股代码", "stock_code");
-            var stockName     = GetString(row, "正股名称", "stock_name", "正股简称");
-            var stockPrice    = GetDouble(row, "正股最新价", "正股现价", "正股价", "stock_price");
-            var stockChange   = GetDouble(row, "正股涨跌幅", "正股涨跌", "stock_change");
-            var convPrice     = GetDouble(row, "转股价", "conversion_price", "转股价格");
-            var convValue     = GetDouble(row, "转股价值", "conversion_value");
-            var premiumRate   = GetDouble(row, "转股溢价率", "premium_rate");
-            var putTrigger    = GetDouble(row, "回售触发价", "put_trigger", "回售价格");
-            var redeemTrigger = GetDouble(row, "强赎触发价", "redeem_trigger", "强赎价格");
+            // ── 行情基础字段（均来自 Push2） ──────────────────────────────────
+            var price         = GetDouble(row, "现价");
+            var changePercent = GetDouble(row, "涨跌幅");
+            var bondName      = GetString(row, "转债名称");
+            var stockName     = GetString(row, "正股名称");
+            var stockPrice    = GetDouble(row, "正股价");
+            var stockChange   = GetDouble(row, "正股涨跌");
+            var convPrice     = GetDouble(row, "转股价");
+            var convValue     = GetDouble(row, "转股价值");
+            var premiumRate   = GetDouble(row, "转股溢价率");
+            var putTrigger    = GetDouble(row, "回售触发价");
+            var redeemTrigger = GetDouble(row, "强赎触发价");
 
-            // 若 AKTools 未返回 convValue / premiumRate，则自行计算
+            // Push2 未提供 convValue / premiumRate 时，自行计算衍生值
             convValue   ??= CalcConversionValue(stockPrice, convPrice);
             premiumRate ??= CalcPremiumRate(price, convValue);
 
-            // ── 4. 合并东方财富详情（评级、到期时间、规模、PB） ───────────────
-            string? creditRating   = null;
-            DateTime? maturityDate = null;
-            double? remainingScale = null;
-            double? stockPB        = null;
+            // ── 3. 合并东方财富详情（评级、到期时间、规模、PB、名称修正） ────────
+            string?   creditRating   = null;
+            DateTime? maturityDate   = null;
+            double?   remainingScale = null;
+            double?   stockPB        = null;
 
             if (detailByCode.TryGetValue(normCode, out var det))
             {
-                // 转债名称以东方财富 RPT_BOND_CB_LIST 中的 SECURITY_SHORT_NAME 为准
+                // 以东方财富 RPT_BOND_CB_LIST 中的 SECURITY_SHORT_NAME 为准覆盖转债名称，
+                // 避免 push2 偶尔将正股名称填入该字段的问题
                 var detName = det.GetValueOrDefault("SECURITY_SHORT_NAME")
                            ?? det.GetValueOrDefault("BOND_SHORT_NAME");
                 if (!string.IsNullOrWhiteSpace(detName))
@@ -231,6 +299,7 @@ public sealed class BondDataService : IDisposable
 
                 creditRating = det.GetValueOrDefault("CREDIT_RATING");
 
+                // 到期时间（尝试两个可能的字段名）
                 var matStr = det.GetValueOrDefault("MATURITY_DATE")
                           ?? det.GetValueOrDefault("EXPIRE_DATE");
                 if (!string.IsNullOrEmpty(matStr) &&
@@ -238,12 +307,14 @@ public sealed class BondDataService : IDisposable
                         DateTimeStyles.None, out var mat))
                     maturityDate = mat;
 
+                // 剩余规模（CURR_ISS_AMT，单位：亿元）
                 var scaleStr = det.GetValueOrDefault("CURR_ISS_AMT");
                 if (!string.IsNullOrEmpty(scaleStr) &&
                     double.TryParse(scaleStr, NumberStyles.Any,
                         CultureInfo.InvariantCulture, out var scale))
                     remainingScale = scale;
 
+                // 正股市净率 P/B（PBV_RATIO）
                 var pbStr = det.GetValueOrDefault("PBV_RATIO");
                 if (!string.IsNullOrEmpty(pbStr) &&
                     double.TryParse(pbStr, NumberStyles.Any,
@@ -251,19 +322,20 @@ public sealed class BondDataService : IDisposable
                     stockPB = pb;
             }
 
-            // 过滤已退市（剩余规模为 0）的转债；规模 null 时保留（数据缺失时不误杀）
+            // 已退市或规模为零的转债直接跳过；规模为 null 时保留（避免因数据缺失误删）
             if (remainingScale.HasValue && remainingScale.Value <= 0) continue;
 
-            // ── 5. 合并集思录强赎数据 ─────────────────────────────────────────
-            int? redeemTriggerDays = null;
-            string? redeemStatus   = null;
+            // ── 4. 合并集思录强赎数据 ──────────────────────────────────────────
+            int?    redeemTriggerDays = null;
+            string? redeemStatus      = null;
 
-            if (redeemByCode.TryGetValue(normCode, out var rd))
+            if (redeemData != null && redeemData.TryGetValue(normCode, out var rd))
             {
                 redeemTriggerDays = rd.days;
                 redeemStatus      = rd.status;
 
-                // 发行人已公告放弃强赎时，将天数归零（监管要求其不得再行使该权利）
+                // 若发行人已公告放弃强赎，将天数归零
+                // （监管要求放弃后不得再次行使，此次强赎倒计时重置）
                 if (!string.IsNullOrEmpty(redeemStatus) &&
                     Regex.IsMatch(redeemStatus, @"不赎|放弃|waiv", RegexOptions.IgnoreCase))
                     redeemTriggerDays = 0;
@@ -273,37 +345,43 @@ public sealed class BondDataService : IDisposable
 
             result.Add(new BondInfo
             {
-                BondCode          = normCode,
-                BondName          = bondName,
-                Price             = price,
-                ChangePercent     = changePercent,
-                StockName         = stockName,
-                StockPrice        = stockPrice,
-                StockChange       = stockChange,
-                StockPB           = stockPB,
-                ConversionPrice   = convPrice,
-                ConversionValue   = convValue,
-                PremiumRate       = premiumRate,
-                CreditRating      = creditRating,
-                PutTriggerPrice   = putTrigger,
-                PutTriggerDays    = 0,   // 回售触发天数需大量股价历史数据，暂不计算
+                BondCode           = normCode,
+                BondName           = bondName,
+                Price              = price,
+                ChangePercent      = changePercent,
+                StockName          = stockName,
+                StockPrice         = stockPrice,
+                StockChange        = stockChange,
+                StockPB            = stockPB,
+                ConversionPrice    = convPrice,
+                ConversionValue    = convValue,
+                PremiumRate        = premiumRate,
+                CreditRating       = creditRating,
+                PutTriggerPrice    = putTrigger,
+                PutTriggerDays     = 0, // 回售触发天数需大量股价历史数据，暂不计算
                 RedeemTriggerPrice = redeemTrigger,
                 RedeemTriggerDays  = redeemTriggerDays,
                 RedeemStatus       = redeemStatus,
-                BondRatio          = null,
+                BondRatio          = GetDouble(row, "转债占比"),
                 MaturityDate       = maturityDate?.ToString("yyyy-MM-dd"),
                 RemainingYears     = remainingYears,
                 RemainingScale     = remainingScale,
             });
         }
 
-        // 按转债代码排序后重新编号
+        // 按转债代码升序排列后，重新生成序号
         result = result.OrderBy(b => b.BondCode).ToList();
         for (int i = 0; i < result.Count; i++)
             result[i].Index = i + 1;
 
+        Debug.WriteLine($"[BondDataService] 合并完成：{result.Count} 只转债");
         return result;
     }
 
-    public void Dispose() => _eastmoney.Dispose();
+    public void Dispose()
+    {
+        _push2.Dispose();
+        _detail.Dispose();
+        _jisilu.Dispose();
+    }
 }
