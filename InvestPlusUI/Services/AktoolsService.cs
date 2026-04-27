@@ -12,6 +12,8 @@ namespace InvestPlusUI.Services;
 /// </summary>
 public sealed class AktoolsService : IDisposable
 {
+    private const int RetryDelayBaseMs = 1200;
+
     private readonly HttpClient _client;
     private readonly string _baseUrl;
 
@@ -43,7 +45,7 @@ public sealed class AktoolsService : IDisposable
 
         foreach (var row in rows)
         {
-            var code = NormalizeCode(GetString(row, "代码", "股票代码", "symbol", "stock_code"));
+            var code = NormalizeSecurityCode(GetString(row, "代码", "股票代码", "symbol", "stock_code"));
             if (string.IsNullOrEmpty(code)) continue;
 
             var name = GetString(row, "名称", "股票名称", "name", "stock_name");
@@ -66,7 +68,7 @@ public sealed class AktoolsService : IDisposable
 
         foreach (var row in rows)
         {
-            var code = NormalizeCode(GetString(row, "转债代码", "代码", "bond_id", "bond_code", "symbol"));
+            var code = NormalizeSecurityCode(GetString(row, "转债代码", "代码", "bond_id", "bond_code", "symbol"));
             if (string.IsNullOrEmpty(code)) continue;
 
             var redeemDays = GetInt(row, "强赎天数", "redeem_tc", "redeem_days");
@@ -99,7 +101,7 @@ public sealed class AktoolsService : IDisposable
             catch (Exception ex) when (attempt < 2)
             {
                 Debug.WriteLine($"[AKTools] {endpoint} 请求失败，第 {attempt + 1} 次重试：{ex.Message}");
-                await Task.Delay(1200 * (attempt + 1), ct);
+                await Task.Delay(RetryDelayBaseMs * (attempt + 1), ct);
             }
             catch (Exception ex)
             {
@@ -196,7 +198,7 @@ public sealed class AktoolsService : IDisposable
         return null;
     }
 
-    private static string NormalizeCode(string? raw)
+    private static string NormalizeSecurityCode(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
         var digits = new string(raw.Where(char.IsDigit).ToArray());

@@ -35,6 +35,8 @@ public sealed class BondDataService : IDisposable
     /// push2 和数据中心接口在字段无数据时均可能返回此值，过滤时需统一处理。
     /// </summary>
     internal const double EastmoneyInvalidValue = -9999.99;
+    private const double DefaultPutTriggerRatio = 0.7;
+    private const double DefaultRedeemTriggerRatio = 1.3;
 
     // ── 服务实例 ──────────────────────────────────────────────────────────────
 
@@ -164,8 +166,8 @@ public sealed class BondDataService : IDisposable
             var redeemTrigger = GetDouble(row, "强赎触发价", "redeem_trigger_price");
 
             // AKTools 基础数据无触发价时，按常见条款比率从转股价推导
-            if (!putTrigger.HasValue && convPrice.HasValue) putTrigger = convPrice.Value * 0.7;
-            if (!redeemTrigger.HasValue && convPrice.HasValue) redeemTrigger = convPrice.Value * 1.3;
+            if (!putTrigger.HasValue && convPrice.HasValue) putTrigger = convPrice.Value * DefaultPutTriggerRatio;
+            if (!redeemTrigger.HasValue && convPrice.HasValue) redeemTrigger = convPrice.Value * DefaultRedeemTriggerRatio;
 
             var mapped = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
             {
