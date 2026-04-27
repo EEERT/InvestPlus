@@ -99,7 +99,9 @@ public sealed class JisiluService : IDisposable
                 await Task.Delay(200, ct);
         }
 
-        return result.Count > 0 ? result : null;
+        // 返回结果字典（可能为空字典，空字典与 null 含义不同：
+        // 空字典 = 成功请求但无数据；null = 请求失败）
+        return result;
     }
 
     // ── 私有方法 ──────────────────────────────────────────────────────────────

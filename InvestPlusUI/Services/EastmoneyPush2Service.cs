@@ -33,8 +33,10 @@ public sealed class EastmoneyPush2Service : IDisposable
     /// </summary>
     private const string UtToken = "bd1d9ddb04089700cf9c27f6f7426281";
 
-    /// <summary>东方财富返回"无有效数据"时使用的特殊占位值，需过滤掉</summary>
-    private const double InvalidValue = -9999.99;
+    /// <summary>
+    /// 东方财富返回"无有效数据"时使用的特殊占位值（与 BondDataService.EastmoneyInvalidValue 保持一致）
+    /// </summary>
+    private const double InvalidValue = BondDataService.EastmoneyInvalidValue;
 
     private readonly HttpClient _client;
 
@@ -118,7 +120,9 @@ public sealed class EastmoneyPush2Service : IDisposable
                 await Task.Delay(150, ct);
         }
 
-        return allRows.Count > 0 ? allRows : null;
+        // 返回已收集的行列表（可能为空列表，空列表与 null 含义不同：
+        // 空列表 = 成功请求但无数据（非交易时段）；null = 请求完全失败）
+        return allRows;
     }
 
     // ── 私有方法 ──────────────────────────────────────────────────────────────

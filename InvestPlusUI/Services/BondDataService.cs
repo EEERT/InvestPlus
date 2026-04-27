@@ -28,6 +28,14 @@ namespace InvestPlusUI.Services;
 /// </summary>
 public sealed class BondDataService : IDisposable
 {
+    // ── 共享常量 ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 东方财富用于表示"无有效数据"的特殊占位值（-9999.99 或更小）。
+    /// push2 和数据中心接口在字段无数据时均可能返回此值，过滤时需统一处理。
+    /// </summary>
+    internal const double EastmoneyInvalidValue = -9999.99;
+
     // ── 服务实例 ──────────────────────────────────────────────────────────────
 
     /// <summary>东方财富 push2 实时行情服务（替代原 AKTools bond_cov_comparison）</summary>
@@ -59,9 +67,13 @@ public sealed class BondDataService : IDisposable
     /// <summary>
     /// 并行获取全部数据源并合并，返回可转债列表及数据更新时间字符串。
     ///
-    /// 若 Push2 数据获取失败则返回空列表（其他数据源失败时做降级处理）。
+    /// 返回值含义：
+    ///   bonds 为空列表时，可能是：
+    ///     a) Push2 请求失败（调用方通过 lastUpdate 中的提示区分）
+    ///     b) 非交易时段，Push2 返回空列表（正常现象）
+    ///   bonds 非空时，为正常合并结果。
     /// </summary>
-    public async Task<(List<BondInfo> bonds, string lastUpdate)> GetBondsAsync(
+    public async Task<(List<BondInfo> bonds, string lastUpdate, bool isNetworkError)> GetBondsAsync(
         CancellationToken ct = default)
     {
         // ── 并行启动请求 ────────────────────────────────────────────────────────
@@ -93,8 +105,10 @@ public sealed class BondDataService : IDisposable
         var detailToUse = detailData ?? _cachedDetails;
 
         // ── 合并数据 ────────────────────────────────────────────────────────────
+        // push2Data == null 表示网络/API 错误；push2Data 为空列表表示非交易时段无数据
+        bool isNetworkError = push2Data == null;
         var bonds = MergeData(push2Data, redeemData, detailToUse);
-        return (bonds, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        return (bonds, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), isNetworkError);
     }
 
     // ── 字段提取辅助方法 ──────────────────────────────────────────────────────
@@ -111,7 +125,7 @@ public sealed class BondDataService : IDisposable
             if (s == "-" || s == "--") continue;
             if (!double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d)) continue;
             // 过滤东方财富的"无数据"特殊值（-9999.99 或 -9999）
-            if (Math.Abs(d - (-9999.99)) < 0.01 || d <= -9999) continue;
+            if (Math.Abs(d - EastmoneyInvalidValue) < 0.01 || d <= -9999) continue;
             return d;
         }
         return null;
@@ -210,9 +224,19 @@ public sealed class BondDataService : IDisposable
         Dictionary<string, (int? days, string? status)>?       redeemData,
         List<Dictionary<string, string?>>?                     detailData)
     {
-        // Push2 数据是主数据源，缺失时无法继续
-        if (push2Data == null || push2Data.Count == 0)
+        // Push2 数据是主数据源：
+        //   null  = 请求失败（网络错误），无法继续
+        //   空列表 = 非交易时段无数据，同样无法展示行情，直接返回
+        if (push2Data == null)
+        {
+            System.Diagnostics.Debug.WriteLine("[BondDataService] Push2 请求失败，无法合并数据");
             return new List<BondInfo>();
+        }
+        if (push2Data.Count == 0)
+        {
+            System.Diagnostics.Debug.WriteLine("[BondDataService] Push2 返回空列表（可能为非交易时段）");
+            return new List<BondInfo>();
+        }
 
         // ── 1. 构建东方财富详情查找表（规范化转债代码 → 详情行） ────────────────
         var detailByCode = new Dictionary<string, Dictionary<string, string?>>(

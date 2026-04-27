@@ -410,12 +410,15 @@ public partial class MainForm : Form
         try
         {
             // 调用数据服务（并行获取三路数据并合并）
-            var (bonds, lastUpdate) = await _dataService.GetBondsAsync(ct);
+            var (bonds, lastUpdate, isNetworkError) = await _dataService.GetBondsAsync(ct);
 
             if (bonds.Count == 0)
             {
-                // 非交易时段或数据源暂时无数据，属正常情况
-                SetStatus("⚠ 暂无数据（可能为非交易时段，或数据源返回空）");
+                // 区分"网络错误"和"非交易时段无数据"两种空列表情况
+                if (isNetworkError)
+                    SetStatus("⚠ 数据获取失败（网络错误或 API 异常），请检查网络连接后重试");
+                else
+                    SetStatus("⚠ 暂无数据（可能为非交易时段，数据源返回空）");
                 return;
             }
 
@@ -664,10 +667,10 @@ public partial class MainForm : Form
                 dlg.FileName, append: false,
                 encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
-            // 写入表头行
+            // 写入表头行（列顺序必须与下方数据行严格一致）
             sw.WriteLine(
                 "序号,转债代码,转债名称,现价,涨跌幅(%),正股名称,正股价,正股涨跌(%)," +
-                "正股PB,转股价,转股价值,转股溢价率(%),债券评级,回售触发价," +
+                "正股PB,转股价,转股价值,转股溢价率(%),债券评级,回售触发价,回售触发天数," +
                 "强赎触发价,强赎天数,强赎状态,转债占比(%),到期时间,剩余年限,剩余规模(亿)");
 
             // 辅助格式化：double? → 字符串（保留 2 位小数）
@@ -683,7 +686,7 @@ public partial class MainForm : Form
                     N(b.Price), N(b.ChangePercent),
                     S(b.StockName), N(b.StockPrice), N(b.StockChange), N(b.StockPB),
                     N(b.ConversionPrice), N(b.ConversionValue), N(b.PremiumRate),
-                    S(b.CreditRating), N(b.PutTriggerPrice),
+                    S(b.CreditRating), N(b.PutTriggerPrice), b.PutTriggerDays,
                     N(b.RedeemTriggerPrice), b.RedeemTriggerDays, S(b.RedeemStatus),
                     N(b.BondRatio), S(b.MaturityDate), N(b.RemainingYears), N(b.RemainingScale)));
             }
