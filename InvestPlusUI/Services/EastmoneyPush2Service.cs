@@ -247,7 +247,7 @@ public sealed class EastmoneyPush2Service : IDisposable
     ///     m:0+t:116  — 深交所可交换债
     ///     m:1+t:185  — 上交所可转债
     ///     m:1+t:186  — 上交所可交换债
-    ///   原先使用的 b:MK0354 实际上只匹配约 10~20 只可交换债，
+    ///   原先使用的 b:MK0354 实际上只匹配约 13 只可交换债，
     ///   并不包含全部 400+ 只可转债，因此改为类型码组合方式以保证数据完整性。
     /// </summary>
     private static string BuildUrl(int page)
