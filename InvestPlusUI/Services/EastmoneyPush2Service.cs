@@ -239,7 +239,16 @@ public sealed class EastmoneyPush2Service : IDisposable
 
     /// <summary>
     /// 构建带查询参数的完整请求 URL。
-    /// 使用 fltt=2 以浮点格式返回数值，fs=b:MK0354 筛选可转债板块。
+    /// 使用 fltt=2 以浮点格式返回数值。
+    ///
+    /// fs 参数说明：
+    ///   使用"市场代码+证券类型"组合筛选，确保覆盖沪深两市的全部可转债和可交换债：
+    ///     m:0+t:115  — 深交所可转债
+    ///     m:0+t:116  — 深交所可交换债
+    ///     m:1+t:185  — 上交所可转债
+    ///     m:1+t:186  — 上交所可交换债
+    ///   原先使用的 b:MK0354 实际上只匹配约 13 只可交换债，
+    ///   并不包含全部 400+ 只可转债，因此改为类型码组合方式以保证数据完整性。
     /// </summary>
     private static string BuildUrl(int page)
     {
@@ -257,7 +266,8 @@ public sealed class EastmoneyPush2Service : IDisposable
             ["fltt"]   = "2",                  // 数值格式（2 = 带小数点浮点数，无需手动除以100）
             ["invt"]   = "2",
             ["fid"]    = "f243",               // 默认排序字段（回售触发价）
-            ["fs"]     = "b:MK0354",           // 市场筛选（MK0354 = 可转债板块）
+            // 沪深两市可转债 + 可交换债（与 akshare bond_zh_hs_cov_spot 保持一致）
+            ["fs"]     = "m:0+t:115,m:0+t:116,m:1+t:185,m:1+t:186",
             ["fields"] = fields,
         };
 

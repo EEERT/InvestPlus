@@ -211,7 +211,7 @@ public partial class MainForm : Form
         };
 
         // 各筛选范围控件（最小值 / 最大值 对）
-        (_numPriceMin,   _numPriceMax)   = MakeRangePair(0m,    10000m, 80m,  200m, dec: 1);
+        (_numPriceMin,   _numPriceMax)   = MakeRangePair(0m,    10000m, 80m,  500m, dec: 1);
         (_numPremiumMin, _numPremiumMax) = MakeRangePair(-100m,  2000m, -50m, 100m, dec: 1);
         (_numYearsMin,   _numYearsMax)   = MakeRangePair(0m,      30m,  0m,    8m,  dec: 2);
 
@@ -590,7 +590,7 @@ public partial class MainForm : Form
     private void ResetFilters()
     {
         _numPriceMin.Value   = 80;
-        _numPriceMax.Value   = 200;
+        _numPriceMax.Value   = 500;
         _numPremiumMin.Value = -50;
         _numPremiumMax.Value = 100;
         _numYearsMin.Value   = 0;
