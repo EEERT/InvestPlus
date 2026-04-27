@@ -15,8 +15,8 @@ namespace InvestPlusUI.Services;
 ///      频率：每次刷新都重新获取（数据随交易实时变化）
 ///
 ///   2. 集思录强赎数据（JisiluService）
-///      提供：强赎天计数、强赎状态
-///      频率：每次刷新都重新获取（强赎天数每个交易日都可能变化）
+///      提供：强赎天计数、强赎状态、回售天计数
+///      频率：每次刷新都重新获取（强赎/回售天数每个交易日都可能变化）
 ///
 ///   3. 东方财富 RPT_BOND_CB_LIST 详情（EastmoneyService）
 ///      提供：转债名称（修正版）、债券评级、到期时间、剩余规模、正股 P/B
@@ -216,13 +216,13 @@ public sealed class BondDataService : IDisposable
     ///
     /// 参数说明：
     ///   push2Data  - 东方财富 push2 实时行情，key 为中文字段名
-    ///   redeemData - 集思录强赎数据，key 为规范化转债代码
+    ///   redeemData - 集思录强赎及回售数据，key 为规范化转债代码
     ///   detailData - 东方财富 RPT_BOND_CB_LIST 详情，key 为东方财富原始英文字段名
     /// </summary>
     private List<BondInfo> MergeData(
-        List<Dictionary<string, string?>>?                     push2Data,
-        Dictionary<string, (int? days, string? status)>?       redeemData,
-        List<Dictionary<string, string?>>?                     detailData)
+        List<Dictionary<string, string?>>?                                push2Data,
+        Dictionary<string, (int? redeemDays, string? status, int? putDays)>? redeemData,
+        List<Dictionary<string, string?>>?                                detailData)
     {
         // Push2 数据是主数据源：
         //   null  = 请求失败（网络错误），无法继续
@@ -325,14 +325,16 @@ public sealed class BondDataService : IDisposable
             // 已退市或规模为零的转债直接跳过；规模为 null 时保留（避免因数据缺失误删）
             if (remainingScale.HasValue && remainingScale.Value <= 0) continue;
 
-            // ── 4. 合并集思录强赎数据 ──────────────────────────────────────────
+            // ── 4. 合并集思录强赎及回售数据 ────────────────────────────────────
             int?    redeemTriggerDays = null;
             string? redeemStatus      = null;
+            int?    putTriggerDays    = null;
 
             if (redeemData != null && redeemData.TryGetValue(normCode, out var rd))
             {
-                redeemTriggerDays = rd.days;
+                redeemTriggerDays = rd.redeemDays;
                 redeemStatus      = rd.status;
+                putTriggerDays    = rd.putDays;
 
                 // 若发行人已公告放弃强赎，将天数归零
                 // （监管要求放弃后不得再次行使，此次强赎倒计时重置）
@@ -358,7 +360,7 @@ public sealed class BondDataService : IDisposable
                 PremiumRate        = premiumRate,
                 CreditRating       = creditRating,
                 PutTriggerPrice    = putTrigger,
-                PutTriggerDays     = 0, // 回售触发天数需大量股价历史数据，暂不计算
+                PutTriggerDays     = putTriggerDays, // 来自集思录；集思录未提供时为 null
                 RedeemTriggerPrice = redeemTrigger,
                 RedeemTriggerDays  = redeemTriggerDays,
                 RedeemStatus       = redeemStatus,
