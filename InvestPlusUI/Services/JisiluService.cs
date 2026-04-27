@@ -30,6 +30,20 @@ public sealed class JisiluService : IDisposable
     /// </summary>
     private const int PageSize = 50;
 
+    /// <summary>
+    /// 集思录中回售天计数的候选字段名列表（按优先级排列）。
+    /// 集思录 API 在不同版本中可能使用不同的字段名，依次尝试以保持兼容性。
+    /// 排列依据：put_tc 是与 redeem_tc 对称的最自然命名，其余为历史版本及常见变体。
+    /// </summary>
+    private static readonly string[] PutTcFieldNames =
+    {
+        "put_tc",         // 最常见写法，与 redeem_tc 对称（优先）
+        "put_count",      // 替代名称
+        "put_cnt",        // 缩写形式
+        "putback_tc",     // 另一种常见写法
+        "put_price_days", // 描述性字段名（低优先）
+    };
+
     private readonly HttpClient _client;
 
     // ── 构造函数 ──────────────────────────────────────────────────────────────
@@ -56,21 +70,22 @@ public sealed class JisiluService : IDisposable
     // ── 公共方法 ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// 获取全部可转债的强赎相关数据，以转债代码（6 位，已规范化）为键。
+    /// 获取全部可转债的强赎及回售相关数据，以转债代码（6 位，已规范化）为键。
     ///
-    /// 返回字典：key = 转债代码，value = (强赎天计数, 强赎状态)
+    /// 返回字典：key = 转债代码，value = (强赎天计数, 强赎状态, 回售天计数)
     ///   - 强赎天计数：正股价连续满足强赎条件的天数（满 15 天可触发强赎）
     ///   - 强赎状态：如"Y"（已触发）、"N"（未触发）、"已公告不赎回"等
+    ///   - 回售天计数：正股价连续满足回售条件的天数（一般满 30 天可触发回售）
     ///
     /// 返回值说明：
     ///   - null       表示获取失败（网络错误或需要鉴权）
     ///   - 空字典     表示无数据
     ///   - 非空字典   正常结果
     /// </summary>
-    public async Task<Dictionary<string, (int? days, string? status)>?> FetchRedeemDataAsync(
+    public async Task<Dictionary<string, (int? redeemDays, string? status, int? putDays)>?> FetchRedeemDataAsync(
         CancellationToken ct = default)
     {
-        var result = new Dictionary<string, (int? days, string? status)>(
+        var result = new Dictionary<string, (int? redeemDays, string? status, int? putDays)>(
             StringComparer.OrdinalIgnoreCase);
 
         int page       = 1;
@@ -85,10 +100,10 @@ public sealed class JisiluService : IDisposable
                 return page == 1 ? null : result;
             }
 
-            foreach (var (code, days, status) in pageResult.Value.rows)
+            foreach (var (code, redeemDays, status, putDays) in pageResult.Value.rows)
             {
                 if (!string.IsNullOrEmpty(code))
-                    result[code] = (days, status);
+                    result[code] = (redeemDays, status, putDays);
             }
 
             totalPages = pageResult.Value.totalPages;
@@ -111,7 +126,7 @@ public sealed class JisiluService : IDisposable
     /// 集思录鉴权失败时通常直接返回 HTML 登录页，本方法检测到后立即返回 null，
     /// 不再重试（重试同样会鉴权失败，没有意义）。
     /// </summary>
-    private async Task<(List<(string code, int? days, string? status)> rows, int totalPages)?> FetchPageAsync(
+    private async Task<(List<(string code, int? redeemDays, string? status, int? putDays)> rows, int totalPages)?> FetchPageAsync(
         int page, CancellationToken ct)
     {
         try
@@ -158,7 +173,7 @@ public sealed class JisiluService : IDisposable
                 : 1;
 
             // 逐行解析数据
-            var rows = new List<(string code, int? days, string? status)>();
+            var rows = new List<(string code, int? redeemDays, string? status, int? putDays)>();
             foreach (var rowEl in rowsEl.EnumerateArray())
             {
                 // 实际数据在 cell 子对象中
@@ -175,14 +190,14 @@ public sealed class JisiluService : IDisposable
                 if (string.IsNullOrEmpty(code)) continue;
 
                 // 强赎天计数（redeem_tc：正股价已连续满足强赎触发价的天数）
-                int? days = null;
+                int? redeemDays = null;
                 if (cell.TryGetProperty("redeem_tc", out var redeemTcEl))
                 {
                     if (redeemTcEl.ValueKind == JsonValueKind.Number)
-                        days = redeemTcEl.GetInt32();
+                        redeemDays = redeemTcEl.GetInt32();
                     else if (redeemTcEl.ValueKind == JsonValueKind.String &&
                              int.TryParse(redeemTcEl.GetString(), out var d))
-                        days = d;
+                        redeemDays = d;
                 }
 
                 // 强赎状态（优先 redeem_status，fallback 到 force_redeem）
@@ -195,7 +210,25 @@ public sealed class JisiluService : IDisposable
                 if (status == null && cell.TryGetProperty("force_redeem", out var frEl))
                     status = frEl.GetString();
 
-                rows.Add((code, days, status));
+                // 回售天计数：集思录可能以多种字段名返回，依次尝试
+                int? putDays = null;
+                foreach (var field in PutTcFieldNames)
+                {
+                    if (!cell.TryGetProperty(field, out var putEl)) continue;
+                    if (putEl.ValueKind == JsonValueKind.Number)
+                    {
+                        putDays = putEl.GetInt32();
+                        break;
+                    }
+                    if (putEl.ValueKind == JsonValueKind.String &&
+                        int.TryParse(putEl.GetString(), out var pd))
+                    {
+                        putDays = pd;
+                        break;
+                    }
+                }
+
+                rows.Add((code, redeemDays, status, putDays));
             }
 
             return (rows, totalPages);

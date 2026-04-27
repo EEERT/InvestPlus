@@ -88,7 +88,10 @@ public partial class MainForm : Form
         (300, "5 分钟"),
     };
 
-    // ── 颜色预警阈值与颜色 ────────────────────────────────────────────────────
+    // ── 格式化常量 ────────────────────────────────────────────────────────────
+
+    /// <summary>涨跌幅列的默认数字格式（保留两位小数）</summary>
+    private const string ChangePercentFormat = "N2";
 
     /// <summary>强赎预警背景色（浅黄）：强赎天数在 10~15 天之间，即将满足强赎条件</summary>
     private static readonly Color ColRedeemWarning = Color.FromArgb(255, 243, 200);
@@ -328,6 +331,7 @@ public partial class MainForm : Form
 
         _grid.CellFormatting += Grid_CellFormatting;
         _grid.RowPrePaint    += Grid_RowPrePaint;
+        _grid.DataError      += Grid_DataError;
 
         // 窗体加载完成后自动触发第一次数据获取
         Load += async (_, _) => await LoadDataAsync();
@@ -625,6 +629,11 @@ public partial class MainForm : Form
     /// <summary>
     /// 为涨跌幅类列（转债涨跌、正股涨跌）设置红涨绿跌的文字颜色。
     /// 符合中国股市的习惯：上涨红色，下跌绿色。
+    ///
+    /// 重要：当 FormattingApplied = true 时，DataGridView 要求 e.Value 必须为 string 类型
+    /// （FormattedValueType 固定为 typeof(string)）。若 e.Value 仍为 double，内部的
+    /// StringConverter 无法完成转换，会抛出 System.FormatException，导致默认错误对话框弹出。
+    /// 因此，设置 FormattingApplied 前必须先将 e.Value 转换为格式化后的字符串。
     /// </summary>
     private void Grid_CellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
     {
@@ -636,11 +645,26 @@ public partial class MainForm : Form
         {
             if (e.Value is double v && e.CellStyle != null)
             {
+                // 将 double 转为格式化字符串（必须先转，FormattingApplied=true 时不能留 double）
+                var fmt = string.IsNullOrEmpty(e.CellStyle.Format) ? ChangePercentFormat : e.CellStyle.Format;
+                e.Value               = v.ToString(fmt, CultureInfo.CurrentCulture);
                 // 上涨红色、下跌绿色（A 股惯例）
                 e.CellStyle.ForeColor = v >= 0 ? Color.Crimson : Color.SeaGreen;
                 e.FormattingApplied   = true;
             }
         }
+    }
+
+    /// <summary>
+    /// DataGridView DataError 事件处理：阻止默认错误对话框弹出，改为静默记录。
+    /// 这是防御性处理，确保任何剩余的格式化异常不会影响用户体验。
+    /// </summary>
+    private static void Grid_DataError(object? sender, DataGridViewDataErrorEventArgs e)
+    {
+        e.ThrowException = false;
+        System.Diagnostics.Debug.WriteLine(
+            $"[DataGridView] DataError 列={e.ColumnIndex} 行={e.RowIndex} " +
+            $"Context={e.Context}: {e.Exception?.Message}");
     }
 
     // ── 导出 CSV ──────────────────────────────────────────────────────────────

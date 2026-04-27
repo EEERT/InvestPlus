@@ -71,8 +71,9 @@ public class BondInfo
     public double? PutTriggerPrice { get; set; }
 
     /// <summary>
-    /// 回售触发天数（已连续满足回售条件的天数）。
-    /// 当前版本暂不计算（需大量历史股价数据），固定为 0。
+    /// 回售触发天数（来自集思录）：正股价已连续满足回售触发条件的天数。
+    /// 一般满 30 个交易日后投资者可要求发行人按面值回购。
+    /// 若集思录未提供此字段，则为 null。
     /// </summary>
     public int? PutTriggerDays { get; set; }
 
