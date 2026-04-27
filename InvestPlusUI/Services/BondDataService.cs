@@ -38,13 +38,16 @@ public sealed class BondDataService : IDisposable
 
     // ── 服务实例 ──────────────────────────────────────────────────────────────
 
-    /// <summary>东方财富 push2 实时行情服务（替代原 AKTools bond_cov_comparison）</summary>
+    /// <summary>AKTools 服务（bond_cov_comparison / stock_zh_a_spot* / bond_cb_redeem_jsl）</summary>
+    private readonly AktoolsService _aktools = new();
+
+    /// <summary>东方财富 push2 实时行情服务（AKTools 异常时的降级兜底）</summary>
     private readonly EastmoneyPush2Service _push2 = new();
 
     /// <summary>东方财富 RPT_BOND_CB_LIST 债券详情服务</summary>
     private readonly EastmoneyService _detail = new();
 
-    /// <summary>集思录强赎数据服务（替代原 AKTools bond_cb_redeem_jsl）</summary>
+    /// <summary>集思录强赎数据服务（AKTools 异常时的降级兜底）</summary>
     private readonly JisiluService _jisilu = new();
 
     // ── 详情数据缓存 ──────────────────────────────────────────────────────────
@@ -77,9 +80,10 @@ public sealed class BondDataService : IDisposable
         CancellationToken ct = default)
     {
         // ── 并行启动请求 ────────────────────────────────────────────────────────
-        // Push2 和集思录每次都刷新（实时数据）
-        var push2Task  = _push2.FetchBondListAsync(ct);
-        var jisiluTask = _jisilu.FetchRedeemDataAsync(ct);
+        // 优先使用 AKTools：转债基础 + 正股行情 + 强赎/回售天数
+        var bondBaseTask = _aktools.FetchBondComparisonAsync(ct);
+        var stockTask    = _aktools.FetchStockSpotAsync(ct);
+        var redeemTask   = _aktools.FetchRedeemDataAsync(ct);
 
         // 东方财富详情：缓存未过期时直接使用缓存，避免重复网络请求
         bool useCache = _cachedDetails != null &&
@@ -88,12 +92,26 @@ public sealed class BondDataService : IDisposable
             ? Task.FromResult<List<Dictionary<string, string?>>?>(_cachedDetails)
             : _detail.FetchBondDetailsAsync(ct);
 
-        // 等待全部请求完成（并行执行，总耗时取决于最慢的那个）
-        await Task.WhenAll(push2Task, jisiluTask, detailTask);
+        // 等待请求完成（并行执行，总耗时取决于最慢的那个）
+        await Task.WhenAll(bondBaseTask, stockTask, redeemTask, detailTask);
 
-        var push2Data  = await push2Task;
-        var redeemData = await jisiluTask;
+        var bondBaseData = await bondBaseTask;
+        var stockData    = await stockTask;
+        var redeemData   = await redeemTask;
         var detailData = await detailTask;
+
+        // 构造统一主数据（与原 push2 字段一致），AKTools 失败则回退到原 push2
+        var push2LikeRows = BuildRowsFromAktools(bondBaseData, stockData);
+        if (push2LikeRows == null)
+        {
+            push2LikeRows = await _push2.FetchBondListAsync(ct);
+        }
+
+        // AKTools 强赎数据缺失时，回退到集思录直连
+        if (redeemData == null)
+        {
+            redeemData = await _jisilu.FetchRedeemDataAsync(ct);
+        }
 
         // ── 更新详情缓存 ────────────────────────────────────────────────────────
         if (!useCache && detailData != null)
@@ -106,9 +124,76 @@ public sealed class BondDataService : IDisposable
 
         // ── 合并数据 ────────────────────────────────────────────────────────────
         // push2Data == null 表示网络/API 错误；push2Data 为空列表表示非交易时段无数据
-        bool isNetworkError = push2Data == null;
-        var bonds = MergeData(push2Data, redeemData, detailToUse);
+        bool isNetworkError = push2LikeRows == null;
+        var bonds = MergeData(push2LikeRows, redeemData, detailToUse);
         return (bonds, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), isNetworkError);
+    }
+
+    private static List<Dictionary<string, string?>>? BuildRowsFromAktools(
+        List<Dictionary<string, string?>>? bondRows,
+        Dictionary<string, (string? name, double? price, double? change)>? stockRows)
+    {
+        if (bondRows == null) return null;
+        var result = new List<Dictionary<string, string?>>();
+
+        foreach (var row in bondRows)
+        {
+            var bondCode = GetString(row, "转债代码", "债券代码", "代码", "symbol", "bond_code");
+            if (string.IsNullOrWhiteSpace(bondCode)) continue;
+            bondCode = NormalizeCode(bondCode);
+            if (string.IsNullOrWhiteSpace(bondCode)) continue;
+
+            var stockCode = GetString(row, "正股代码", "股票代码", "stock_code", "symbol_stk");
+            if (!string.IsNullOrWhiteSpace(stockCode))
+                stockCode = NormalizeCode(stockCode);
+
+            string? stockName = null;
+            double? stockPrice = null;
+            double? stockChange = null;
+            if (!string.IsNullOrWhiteSpace(stockCode) &&
+                stockRows != null &&
+                stockRows.TryGetValue(stockCode, out var stock))
+            {
+                stockName = stock.name;
+                stockPrice = stock.price;
+                stockChange = stock.change;
+            }
+
+            var convPrice = GetDouble(row, "转股价", "转股价格", "conversion_price");
+            var putTrigger = GetDouble(row, "回售触发价", "put_trigger_price");
+            var redeemTrigger = GetDouble(row, "强赎触发价", "redeem_trigger_price");
+
+            // AKTools 基础数据无触发价时，按常见条款比率从转股价推导
+            if (!putTrigger.HasValue && convPrice.HasValue) putTrigger = convPrice.Value * 0.7;
+            if (!redeemTrigger.HasValue && convPrice.HasValue) redeemTrigger = convPrice.Value * 1.3;
+
+            var mapped = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["转债代码"] = bondCode,
+                ["转债名称"] = GetString(row, "转债名称", "债券简称", "名称", "bond_name", "name"),
+                ["现价"] = GetDouble(row, "现价", "最新价", "价格", "price", "close")
+                    ?.ToString(CultureInfo.InvariantCulture),
+                ["涨跌幅"] = GetDouble(row, "涨跌幅", "changepercent", "pct_chg", "change")
+                    ?.ToString(CultureInfo.InvariantCulture),
+                ["正股代码"] = stockCode,
+                ["正股名称"] = stockName ?? GetString(row, "正股名称", "股票名称", "stock_name"),
+                ["正股价"] = stockPrice?.ToString(CultureInfo.InvariantCulture),
+                ["正股涨跌"] = stockChange?.ToString(CultureInfo.InvariantCulture),
+                ["转股价"] = convPrice?.ToString(CultureInfo.InvariantCulture),
+                ["转股价值"] = GetDouble(row, "转股价值", "conversion_value")
+                    ?.ToString(CultureInfo.InvariantCulture),
+                ["转股溢价率"] = GetDouble(row, "转股溢价率", "premium_rt", "premium_rate")
+                    ?.ToString(CultureInfo.InvariantCulture),
+                ["回售触发价"] = putTrigger?.ToString(CultureInfo.InvariantCulture),
+                ["强赎触发价"] = redeemTrigger?.ToString(CultureInfo.InvariantCulture),
+                ["转债占比"] = GetDouble(row, "转债占比", "bond_ratio", "convertible_bond_ratio")
+                    ?.ToString(CultureInfo.InvariantCulture),
+            };
+
+            result.Add(mapped);
+        }
+
+        return result;
     }
 
     // ── 字段提取辅助方法 ──────────────────────────────────────────────────────
@@ -382,6 +467,7 @@ public sealed class BondDataService : IDisposable
 
     public void Dispose()
     {
+        _aktools.Dispose();
         _push2.Dispose();
         _detail.Dispose();
         _jisilu.Dispose();

@@ -2,7 +2,7 @@
 
 InvestPlus 是一款**可转债行情监测工具**，采用纯 **C# / WinForms .NET 8** 架构。
 
-数据直接从东方财富和集思录获取，**无需安装 Python 或启动 AKTools 服务**，开箱即用。
+默认优先通过 **AKTools API** 获取可转债与正股数据，并在异常时自动回退到东方财富/集思录直连数据源。
 
 ---
 
@@ -21,11 +21,13 @@ InvestPlus 是一款**可转债行情监测工具**，采用纯 **C# / WinForms 
 
 | 数据 | 来源 | 获取方式 |
 |------|------|---------|
-| 实时行情（价格、涨跌幅、溢价率等） | 东方财富 push2 | 直接 HTTP 调用 |
-| 强赎天计数、强赎状态 | 集思录 | 直接 HTTP 调用 |
+| 可转债基础数据 | AKTools `bond_cov_comparison` | HTTP 调用 AKTools API |
+| 正股实时数据 | AKTools `stock_zh_a_spot_em` / `stock_zh_a_spot` | HTTP 调用 AKTools API |
+| 强赎/回售天计数 | AKTools `bond_cb_redeem_jsl` | HTTP 调用 AKTools API |
 | 转债名称（修正）、债券评级、到期时间、剩余规模、正股PB | 东方财富数据中心 RPT_BOND_CB_LIST | 直接 HTTP 调用 |
+| 兜底行情与强赎数据 | 东方财富 push2 / 集思录 | AKTools 异常时自动降级 |
 
-> **注意**：集思录 API 无需登录即可获取数据，若因鉴权原因获取失败，强赎天数列将显示空白，其余数据不受影响。
+> **注意**：AKTools API 默认地址为 `http://127.0.0.1:8080/api/public`，可通过环境变量 `AKTOOLS_BASE_URL` 覆盖。
 
 ---
 
@@ -36,7 +38,7 @@ InvestPlus 是一款**可转债行情监测工具**，采用纯 **C# / WinForms 
 | .NET SDK | **8.0** |
 | Windows | 10 / 11 |
 
-> ✅ 无需 Python，无需 AKTools，无需任何外部服务。
+> ✅ 若启用 AKTools 主数据源，请确保本机 AKTools API 服务可访问。
 
 ---
 
@@ -106,4 +108,3 @@ A: 程序优先使用东方财富 RPT_BOND_CB_LIST 中的债券简称（SECURITY
 
 **Q: 如何设置合理的刷新频率？**
 A: 交易时段建议 30~60 秒；非交易时段数据不变化，建议关闭自动刷新或设置 5 分钟间隔。
-

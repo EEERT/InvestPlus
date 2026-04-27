@@ -7,7 +7,7 @@ namespace InvestPlusUI;
 /// 应用程序入口点。
 ///
 /// InvestPlus 是一款可转债行情监测工具，采用纯 C# / WinForms .NET 8 架构。
-/// 数据直接从东方财富和集思录获取，无需安装 Python 或 AKTools。
+/// 数据优先来自 AKTools API，并在异常时自动降级到东方财富和集思录直连源。
 /// </summary>
 internal static class Program
 {

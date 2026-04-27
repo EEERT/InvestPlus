@@ -14,9 +14,9 @@ namespace InvestPlusUI;
 ///   数据表格 — DataGridView（支持列排序、行色彩预警、涨跌着色）
 ///   状态栏   — 符合条件数量 / 总数、最后更新时间、数据源连通状态
 ///
-/// 数据来源（无需 AKTools，全部后台自动获取）：
-///   1. 东方财富 push2 实时行情
-///   2. 集思录强赎数据
+/// 数据来源：
+///   1. AKTools（bond_cov_comparison + stock_zh_a_spot* + bond_cb_redeem_jsl）
+///   2. 东方财富 push2 / 集思录（AKTools 异常时自动兜底）
 ///   3. 东方财富 RPT_BOND_CB_LIST 债券详情（10 分钟缓存）
 /// </summary>
 public partial class MainForm : Form
@@ -420,7 +420,7 @@ public partial class MainForm : Form
             {
                 // 区分"网络错误"和"非交易时段无数据"两种空列表情况
                 if (isNetworkError)
-                    SetStatus("⚠ 数据获取失败（网络错误或 API 异常），请检查网络连接后重试");
+                    SetStatus("⚠ 数据获取失败（AKTools/API 异常），请检查网络连接与 AKTools 服务后重试");
                 else
                     SetStatus("⚠ 暂无数据（可能为非交易时段，数据源返回空）");
                 return;
@@ -445,8 +445,9 @@ public partial class MainForm : Form
                 $"获取数据时发生错误：\n{ex.Message}\n\n" +
                 "请检查：\n" +
                 "1. 网络连接是否正常\n" +
-                "2. 是否可以访问 push2.eastmoney.com 和 datacenter-web.eastmoney.com\n" +
-                "3. 若在非交易时段，部分接口可能返回空数据，属正常现象",
+                "2. AKTOOLS_BASE_URL 对应服务是否可访问（默认 http://127.0.0.1:8080/api/public）\n" +
+                "3. 是否可以访问 push2.eastmoney.com 和 datacenter-web.eastmoney.com（兜底数据源）\n" +
+                "4. 若在非交易时段，部分接口可能返回空数据，属正常现象",
                 "加载失败",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
